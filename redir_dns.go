@@ -47,13 +47,13 @@ func init() {
 
 // RedirDns is a Caddy module implementing HTTP redirects stored in DNS TXT records
 type RedirDns struct {
-	// DefaultTarget The target URL to redirect when an error occurs. Default: none
+	// The target URL to redirect when an error occurs. Default: none
 	DefaultTarget string `json:"default_target,omitempty"`
-	// DNS TXT record prefix where the redirect information is stored. Default _redirect
+	// DNS TXT record prefix where the redirect information is stored. Default: "_redirdns"
 	DnsPrefix string `json:"dns_prefix,omitempty"`
-	// StatusCode The HTTP status code returned by the redirect response. Default: 302
+	// The HTTP status code returned by the redirect response. Default: 302
 	StatusCode int `json:"status_code,omitempty"`
-	// responseTpl The HTML response document served when the redirect cannot be completed
+	// The HTML response document served when the redirect cannot be completed
 	responseTpl *template.Template
 	logger      *zap.Logger
 	replacer    *strings.Replacer
