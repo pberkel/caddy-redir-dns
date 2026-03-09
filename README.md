@@ -4,7 +4,7 @@ This is comprehensive rewrite of the [argami/redir-dns](https://github.com/argam
 
 ### Installation
 
-This module requires Caddy Server 2.10.2 or later.  The simplest way to build the module is using xcaddy:
+This module requires Caddy Server 2.11.1 or later.  The simplest way to build the module is using xcaddy:
 
 ```bash
 $ xcaddy build --with github.com/pberkel/caddy-redir-dns
@@ -28,6 +28,11 @@ Several optional parameters are also supported:
 		default_target "https://www.example.com"
 		dns_prefix "_redirdns"
 		status_code 302
+		lookup_timeout 500ms
+		cache_ttl 30s
+		rate_window 1m
+		max_unique_hosts_per_client 50
+		trusted_proxies 10.0.0.0/8 192.168.0.0/16
 	}
 }
 ```
@@ -35,6 +40,12 @@ Several optional parameters are also supported:
 * __default_target__ specifies a redirect URL that will be used if the module is unable to determine an appropriate redirect location (i.e. the hostname is an IP address, the TXT record doesn't exit or is invalid).  If this parameter is not set and an error occurs during redirect processing, a simple 404 response will be returned.
 * __dns_prefix__ specifies the prefix used to construct the TXT DNS record name where redirect information for a given host is stored in the format <dns_prefix>.host.domain.  Default value: "_redirdns".
 * __status_code__ specifies the numeric HTTP response code used in the redirect. Allowed values are between 300-399 inclusive and 401. Default value: 302.
+* __lookup_timeout__ specifies the maximum time to wait for each DNS TXT lookup before applying fallback behavior.  Duration format must be valid for Go's `time.ParseDuration` (for example `500ms`, `2s`).  Default value: `500ms`.
+* __cache_ttl__ specifies how long successful or failed DNS TXT lookup results are cached in memory.  Duration format must be valid for Go's `time.ParseDuration` (for example `30s`, `2m`).  Default value: `30s`.
+* __rate_window__ specifies the per-client sliding window used for unique-host tracking.  Duration format must be valid for Go's `time.ParseDuration` (for example `1m`, `30s`).  Default value: `1m`.
+* __max_unique_hosts_per_client__ specifies how many unique hostnames a single client may request within `rate_window` before lookups are rate-limited.  Default value: `50`.
+* __trusted_proxies__ specifies CIDRs or IP addresses that are allowed to provide the client IP via the `X-Forwarded-For` request header.  If the direct peer is not trusted, `X-Forwarded-For` is ignored and the remote peer address is used instead.
+* When the per-client unique-host limit is exceeded, requests use `default_target` fallback if configured; otherwise a `429 Too Many Requests` response is returned.
 
 ### Usage
 
