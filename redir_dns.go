@@ -33,6 +33,10 @@ const (
 	// Default DNS lookup timeout per request
 	defaultDnsLookupTimeout = 500 * time.Millisecond
 
+	// Maximum allowed DNS lookup timeout — guards against goroutine accumulation
+	// since lookups run on context.Background() and are not bounded by request lifetime
+	maxLookupTimeout = 30 * time.Second
+
 	// Default DNS TXT cache TTL
 	defaultDnsCacheTTL = 30 * time.Second
 
@@ -41,6 +45,12 @@ const (
 
 	// Default maximum unique hosts per client in a window
 	defaultMaxUniqueHostsPerClient = 50
+
+	// Default maximum number of DNS TXT cache entries
+	defaultMaxCacheSize = 10_000
+
+	// Default maximum number of tracked rate-limit clients
+	defaultMaxClients = 100_000
 
 	// Default HTTP response template
 	defaultResponseTemplate = `<!DOCTYPE html>
@@ -57,7 +67,10 @@ const (
 </html>`
 )
 
-var errNoTXTRecord = errors.New("no TXT DNS record found")
+var (
+	errNoTXTRecord = errors.New("no TXT DNS record found")
+	txtPrefixRegex = regexp.MustCompile(`^[_a-zA-Z0-9]([_a-zA-Z0-9-]{0,61}[_a-zA-Z0-9])?$`)
+)
 
 func init() {
 	caddy.RegisterModule(&RedirDns{})
@@ -92,6 +105,10 @@ type RedirDns struct {
 	RateWindow caddy.Duration `json:"rate_window,omitempty"`
 	// Maximum unique hosts allowed per client within rate_window. Default: 50
 	MaxUniqueHostsPerClient int `json:"max_unique_hosts_per_client,omitempty"`
+	// Maximum number of DNS TXT records held in the in-memory cache. Default: 10000
+	MaxCacheSize int `json:"max_cache_size,omitempty"`
+	// Maximum number of per-client rate-limit entries tracked in memory. Default: 100000
+	MaxClients int `json:"max_clients,omitempty"`
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 	// The HTML response document served when the redirect cannot be completed
@@ -102,13 +119,15 @@ type RedirDns struct {
 	lookupTTL   time.Duration
 	lookupMax   time.Duration
 	lookupFunc  func(context.Context, string) ([]string, error)
-	cacheMu     sync.RWMutex
-	cache       map[string]dnsCacheEntry
-	lookupGroup singleflight.Group
-	rlMu        sync.Mutex
-	clients     map[string]*clientHostTracker
-	rateWindow  time.Duration
-	maxHosts    int
+	cacheMu      sync.RWMutex
+	cache        map[string]dnsCacheEntry
+	maxCacheSize int
+	lookupGroup  singleflight.Group
+	rlMu       sync.Mutex
+	clients    map[string]*clientHostTracker
+	maxClients int
+	rateWindow time.Duration
+	maxHosts   int
 	trustedNets []netip.Prefix
 	lastCleanup time.Time
 }
@@ -123,11 +142,15 @@ func New() *RedirDns {
 		CacheTTL:                caddy.Duration(defaultDnsCacheTTL),
 		RateWindow:              caddy.Duration(defaultRateLimitWindow),
 		MaxUniqueHostsPerClient: defaultMaxUniqueHostsPerClient,
+		MaxCacheSize:            defaultMaxCacheSize,
+		MaxClients:              defaultMaxClients,
 		resolver:                net.DefaultResolver,
 		lookupTTL:               defaultDnsCacheTTL,
 		lookupMax:               defaultDnsLookupTimeout,
 		cache:                   make(map[string]dnsCacheEntry),
+		maxCacheSize:            defaultMaxCacheSize,
 		clients:                 make(map[string]*clientHostTracker),
+		maxClients:              defaultMaxClients,
 		rateWindow:              defaultRateLimitWindow,
 		maxHosts:                defaultMaxUniqueHostsPerClient,
 	}
@@ -169,25 +192,41 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	rd.lookupTTL = time.Duration(rd.CacheTTL)
 	rd.rateWindow = time.Duration(rd.RateWindow)
 	rd.maxHosts = rd.MaxUniqueHostsPerClient
+	rd.maxCacheSize = rd.MaxCacheSize
+	rd.maxClients = rd.MaxClients
 	rd.trustedNets, err = parseTrustedProxyPrefixes(rd.TrustedProxies)
 	if err != nil {
 		return err
 	}
 	// compile error response template
 	rd.responseTpl, err = template.New("default").Parse(defaultResponseTemplate)
+	if err != nil {
+		return err
+	}
+	rd.logger.Info("provisioned module",
+		zap.String("default_target", rd.DefaultTarget),
+		zap.String("dns_prefix", rd.DnsPrefix),
+		zap.Int("status_code", rd.StatusCode),
+		zap.Duration("lookup_timeout", time.Duration(rd.LookupTimeout)),
+		zap.Duration("cache_ttl", time.Duration(rd.CacheTTL)),
+		zap.Int("max_cache_size", rd.MaxCacheSize),
+		zap.Int("max_clients", rd.MaxClients),
+		zap.Duration("rate_window", time.Duration(rd.RateWindow)),
+		zap.Int("max_unique_hosts_per_client", rd.MaxUniqueHostsPerClient),
+		zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
+	)
 
-	return err
+	return nil
 }
 
 // Validate implements caddy.Validator
 func (rd *RedirDns) Validate() error {
 	// Check if default target is supplied and is a valid absolute URL
-	if rd.DefaultTarget != "" && !isValidAbsoluteURL(rd.DefaultTarget) {
+	if rd.DefaultTarget != "" && (!isValidAbsoluteURL(rd.DefaultTarget) || containsNonPrintableASCII(rd.DefaultTarget)) {
 		return fmt.Errorf("invalid absolute URL default_target '%s'", rd.DefaultTarget)
 	}
 	// Check if supplied DNS TXT record prefix is valid
-	var txtprefixRegex = regexp.MustCompile(`^[_a-zA-Z0-9]([_a-zA-Z0-9-]{0,61}[_a-zA-Z0-9])?$`)
-	if !txtprefixRegex.MatchString(rd.DnsPrefix) {
+	if !txtPrefixRegex.MatchString(rd.DnsPrefix) {
 		return fmt.Errorf("invalid dns_prefix '%s'", rd.DnsPrefix)
 	}
 	// Check if supplied response status code is supported
@@ -196,6 +235,9 @@ func (rd *RedirDns) Validate() error {
 	}
 	if rd.LookupTimeout <= 0 {
 		return fmt.Errorf("lookup_timeout must be greater than 0")
+	}
+	if time.Duration(rd.LookupTimeout) > maxLookupTimeout {
+		return fmt.Errorf("lookup_timeout must not exceed %s", maxLookupTimeout)
 	}
 	if rd.CacheTTL <= 0 {
 		return fmt.Errorf("cache_ttl must be greater than 0")
@@ -206,20 +248,12 @@ func (rd *RedirDns) Validate() error {
 	if rd.MaxUniqueHostsPerClient <= 0 {
 		return fmt.Errorf("max_unique_hosts_per_client must be greater than 0")
 	}
-	if _, err := parseTrustedProxyPrefixes(rd.TrustedProxies); err != nil {
-		return err
+	if rd.MaxCacheSize <= 0 {
+		return fmt.Errorf("max_cache_size must be greater than 0")
 	}
-	rd.logger.Info("provisioned module with default values",
-		zap.String("default_target", rd.DefaultTarget),
-		zap.String("dns_prefix", rd.DnsPrefix),
-		zap.Int("status_code", rd.StatusCode),
-		zap.Duration("lookup_timeout", time.Duration(rd.LookupTimeout)),
-		zap.Duration("cache_ttl", time.Duration(rd.CacheTTL)),
-		zap.Duration("rate_window", time.Duration(rd.RateWindow)),
-		zap.Int("max_unique_hosts_per_client", rd.MaxUniqueHostsPerClient),
-		zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
-	)
-
+	if rd.MaxClients <= 0 {
+		return fmt.Errorf("max_clients must be greater than 0")
+	}
 	return nil
 }
 
@@ -304,6 +338,7 @@ func writeRedirectResponse(w http.ResponseWriter, statusCode int, location strin
 
 func (rd *RedirDns) writeHtmlResponse(w http.ResponseWriter, statusCode int, title, msg string) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(statusCode)
 	data := map[string]string{
 		"Title": title,
@@ -365,7 +400,7 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 	parts := strings.Fields(replaced)
 	// First part (manditory) should be the target URL
 	if len(parts) > 0 {
-		if isValidAbsoluteURL(parts[0]) {
+		if isValidAbsoluteURL(parts[0]) && !containsNonPrintableASCII(parts[0]) {
 			targetUrl = parts[0]
 		} else {
 			rd.logger.Debug("Rejected DNS TXT redirect candidate because target is not a valid absolute HTTP/HTTPS URL")
@@ -404,7 +439,7 @@ func (rd *RedirDns) lookupTXT(ctx context.Context, query string) ([]string, erro
 			return dnsCacheEntry{txt: txt, err: err}, nil
 		}
 
-		lookupCtx, cancel := context.WithTimeout(ctx, rd.lookupMax)
+		lookupCtx, cancel := context.WithTimeout(context.Background(), rd.lookupMax)
 		defer cancel()
 		var (
 			txt []string
@@ -454,8 +489,34 @@ func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, 
 
 func (rd *RedirDns) storeLookup(query string, entry dnsCacheEntry) {
 	rd.cacheMu.Lock()
+	defer rd.cacheMu.Unlock()
+	if _, exists := rd.cache[query]; !exists && len(rd.cache) >= rd.maxCacheSize {
+		rd.evictOneCacheEntry(time.Now())
+	}
 	rd.cache[query] = entry
-	rd.cacheMu.Unlock()
+}
+
+// evictOneCacheEntry removes a single cache entry. It must be called with cacheMu write lock held.
+// It prefers evicting an already-expired entry; if none exist it evicts the entry with the
+// soonest expiry (i.e. the one that would expire next).
+func (rd *RedirDns) evictOneCacheEntry(now time.Time) {
+	for k, e := range rd.cache {
+		if now.After(e.expiresAt) {
+			delete(rd.cache, k)
+			return
+		}
+	}
+	var soonestKey string
+	var soonestExpiry time.Time
+	for k, e := range rd.cache {
+		if soonestKey == "" || e.expiresAt.Before(soonestExpiry) {
+			soonestKey = k
+			soonestExpiry = e.expiresAt
+		}
+	}
+	if soonestKey != "" {
+		delete(rd.cache, soonestKey)
+	}
 }
 
 func (rd *RedirDns) clientIDFromRequest(r *http.Request) string {
@@ -556,6 +617,9 @@ func (rd *RedirDns) isClientHostRateLimited(clientID, host string, now time.Time
 
 	tracker, ok := rd.clients[clientID]
 	if !ok {
+		if len(rd.clients) >= rd.maxClients {
+			rd.evictOldestClient()
+		}
 		tracker = &clientHostTracker{
 			hosts: make(map[string]time.Time),
 		}
@@ -579,6 +643,21 @@ func (rd *RedirDns) isClientHostRateLimited(clientID, host string, now time.Time
 	tracker.hosts[host] = now
 
 	return false
+}
+
+// evictOldestClient removes the client with the oldest lastSeen time. It must be called with rlMu held.
+func (rd *RedirDns) evictOldestClient() {
+	var oldest string
+	var oldestSeen time.Time
+	for id, tracker := range rd.clients {
+		if oldest == "" || tracker.lastSeen.Before(oldestSeen) {
+			oldest = id
+			oldestSeen = tracker.lastSeen
+		}
+	}
+	if oldest != "" {
+		delete(rd.clients, oldest)
+	}
 }
 
 func (rd *RedirDns) cleanupRateLimitState(now time.Time) {
@@ -643,6 +722,30 @@ func isValidDNSHost(host string) bool {
 	return true
 }
 
+// containsNonPrintableASCII reports whether s contains any byte outside the
+// printable ASCII range (0x20–0x7E).
+//
+// HTTP header values, including Location, must be ASCII per RFC 7230 §3.2.6.
+// Non-ASCII characters (e.g. in IRIs) must be percent-encoded before being
+// placed in a redirect URL — at which point they become plain printable ASCII
+// by definition. Accepting raw non-ASCII bytes would silently rely on Go's
+// net/http stripping them at write time; we enforce the constraint explicitly
+// so the rejection is visible in logs rather than a silent sanitisation.
+//
+// Rejected ranges:
+//   - 0x00–0x1F: ASCII C0 controls (\r, \n, \t, NUL, …) — classic header-injection vector
+//   - 0x7F:      DEL — non-printable, no role in a URL
+//   - 0x80–0xFF: non-ASCII bytes — must be percent-encoded in a Location value
+func containsNonPrintableASCII(s string) bool {
+	for i := range len(s) {
+		c := s[i]
+		if c < 0x20 || c >= 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func isValidAbsoluteURL(location string) bool {
 	parsedUrl, err := url.Parse(location)
 	if err != nil {
@@ -650,6 +753,11 @@ func isValidAbsoluteURL(location string) bool {
 	}
 	// restrict to HTTP/HTTPS only
 	if parsedUrl.Scheme != "http" && parsedUrl.Scheme != "https" {
+		return false
+	}
+	// reject credential-bearing URLs — redirecting to https://user:pass@host
+	// leaks credentials in browser history and Referer headers
+	if parsedUrl.User != nil {
 		return false
 	}
 	// must have a non-empty host
@@ -684,8 +792,8 @@ func classifyLookupError(err error) string {
 }
 
 func isSupportedStatusCode(code int) bool {
-	// HTTP response code can be any number in the 3xx range or 401
-	if (code >= 300 && code < 400) || code == 401 {
+	// HTTP response code must be in the 3xx redirect range
+	if code >= 300 && code < 400 {
 		return true
 	}
 
@@ -752,6 +860,24 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return fmt.Errorf("invalid max_unique_hosts_per_client %q: %v", d.Val(), err)
 				}
 				rd.MaxUniqueHostsPerClient = maxHosts
+			case "max_cache_size":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				maxCacheSize, err := strconv.Atoi(d.Val())
+				if err != nil {
+					return fmt.Errorf("invalid max_cache_size %q: %v", d.Val(), err)
+				}
+				rd.MaxCacheSize = maxCacheSize
+			case "max_clients":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				maxClients, err := strconv.Atoi(d.Val())
+				if err != nil {
+					return fmt.Errorf("invalid max_clients %q: %v", d.Val(), err)
+				}
+				rd.MaxClients = maxClients
 			case "trusted_proxies":
 				if !d.NextArg() {
 					return d.ArgErr()
