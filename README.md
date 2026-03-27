@@ -39,7 +39,7 @@ Several optional parameters are also supported:
 
 * __default_target__ specifies a redirect URL that will be used if the module is unable to determine an appropriate redirect location (i.e. the hostname is an IP address, the TXT record doesn't exit or is invalid).  If this parameter is not set and an error occurs during redirect processing, a simple 404 response will be returned.
 * __dns_prefix__ specifies the prefix used to construct the TXT DNS record name where redirect information for a given host is stored in the format <dns_prefix>.host.domain.  Default value: "_redirdns".
-* __status_code__ specifies the numeric HTTP response code used in the redirect. Allowed values are between 300-399 inclusive and 401. Default value: 302.
+* __status_code__ specifies the numeric HTTP response code used in the redirect. Allowed values are between 300-399 inclusive. Default value: 302.
 * __lookup_timeout__ specifies the maximum time to wait for each DNS TXT lookup before applying fallback behavior.  Duration format must be valid for Go's `time.ParseDuration` (for example `500ms`, `2s`).  Default value: `500ms`.
 * __cache_ttl__ specifies how long successful or failed DNS TXT lookup results are cached in memory.  Duration format must be valid for Go's `time.ParseDuration` (for example `30s`, `2m`).  Default value: `30s`.
 * __rate_window__ specifies the per-client sliding window used for unique-host tracking.  Duration format must be valid for Go's `time.ParseDuration` (for example `1m`, `30s`).  Default value: `1m`.
@@ -57,7 +57,9 @@ To implement a HTTP redirect for host `www.example.com` first create an A or CNA
 www.example.com. IN CNAME my-caddy-server.com.
 ```
 
-Then create a corresponding TXT DNS record name with the appropriate `dns_prefix` prepended to the hostname and the value containing the redirect target URL (which must be valid and fully qualified):
+Then create a corresponding TXT DNS record name with the appropriate `dns_prefix` prepended to the hostname and the value containing the redirect target URL (which must be valid, fully qualified, and contain only printable ASCII characters).
+
+> **URL encoding requirement:** HTTP `Location` headers are ASCII-only (RFC 7230). Any non-ASCII characters in the target URL must be encoded before being placed in the TXT record: use [Punycode](https://en.wikipedia.org/wiki/Punycode) for internationalised domain names (e.g. `xn--mnchen-3ya.de` instead of `münchen.de`) and [percent-encoding](https://en.wikipedia.org/wiki/Percent-encoding) for non-ASCII path or query characters (e.g. `caf%C3%A9` instead of `café`). URLs containing raw non-ASCII or control characters will be rejected at redirect time.
 
 ```
 _redirdns.www.example.com. IN TXT "https://www.redirect-target.com"
@@ -99,6 +101,8 @@ This module supports a subset of Caddy HTTP [placeholders](https://caddyserver.c
 | {?query} | {http.request.uri.prefixed_query} |
 
 **NOTE:** `{%uri}`, `{%path}`, and `{%query}` require Caddy Server 2.11 or later.
+
+**NOTE:** The URL encoding requirement above applies to the fully expanded redirect target. If a placeholder such as `{path}` may expand to non-ASCII characters, use the percent-encoded variant `{%path}` instead to ensure the result is valid ASCII.
 
 Several examples demonstrate how placeholder values will be substituted:
 

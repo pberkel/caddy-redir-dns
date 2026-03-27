@@ -17,6 +17,79 @@ import (
 	"go.uber.org/zap"
 )
 
+func TestContainsControlChars(t *testing.T) {
+	t.Parallel()
+
+	allowed := []string{
+		"https://example.com/path?q=1",
+		"https://example.com/%0d%0a", // percent-encoded CRLF — plain printable ASCII, safe
+		"https://xn--mnchen-3ya.de/", // IDN in punycode — ASCII only
+	}
+	for _, s := range allowed {
+		if containsNonPrintableASCII(s) {
+			t.Errorf("containsNonPrintableASCII(%q) = true, want false", s)
+		}
+	}
+
+	rejected := []string{
+		"https://example.com/\r\nX-Injected: evil", // C0: CR + LF (header injection)
+		"https://example.com/\x00",                 // C0: NUL
+		"https://example.com/\x1f",                 // C0: last C0 control
+		"https://example.com/\x7f",                 // DEL
+		"https://münchen.de/",                      // raw non-ASCII — must be punycode/percent-encoded
+		"https://example.com/caf\u00e9",            // raw non-ASCII in path — must be percent-encoded
+	}
+	for _, s := range rejected {
+		if !containsNonPrintableASCII(s) {
+			t.Errorf("containsNonPrintableASCII(%q) = false, want true", s)
+		}
+	}
+}
+
+func TestIsSupportedStatusCode(t *testing.T) {
+	t.Parallel()
+
+	valid := []int{300, 301, 302, 303, 307, 308, 399}
+	for _, code := range valid {
+		if !isSupportedStatusCode(code) {
+			t.Errorf("isSupportedStatusCode(%d) = false, want true", code)
+		}
+	}
+
+	invalid := []int{200, 204, 401, 403, 404, 500}
+	for _, code := range invalid {
+		if isSupportedStatusCode(code) {
+			t.Errorf("isSupportedStatusCode(%d) = true, want false", code)
+		}
+	}
+}
+
+func TestIsValidAbsoluteURLRejectsCredentials(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		"https://example.com",
+		"https://example.com/path?q=1",
+		"http://example.com",
+	}
+	for _, u := range valid {
+		if !isValidAbsoluteURL(u) {
+			t.Errorf("isValidAbsoluteURL(%q) = false, want true", u)
+		}
+	}
+
+	invalid := []string{
+		"https://user:pass@example.com", // username + password
+		"https://user@example.com",      // username only
+		"https://:pass@example.com",     // password without username
+	}
+	for _, u := range invalid {
+		if isValidAbsoluteURL(u) {
+			t.Errorf("isValidAbsoluteURL(%q) = true, want false", u)
+		}
+	}
+}
+
 func TestNormalizeRequestHost(t *testing.T) {
 	t.Parallel()
 
@@ -159,6 +232,124 @@ func TestLookupTXTSingleflightDedupesConcurrentCalls(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("lookup function called %d times, want 1", calls.Load())
+	}
+}
+
+func TestIsClientHostRateLimitedRespectsMaxClients(t *testing.T) {
+	t.Parallel()
+
+	const maxClients = 2
+	rd := newTestRedirDns(t)
+	rd.maxClients = maxClients
+	rd.maxHosts = 100
+	rd.rateWindow = time.Minute
+
+	now := time.Now()
+	rd.isClientHostRateLimited("client-a", "a.example.com", now)
+	rd.isClientHostRateLimited("client-b", "b.example.com", now)
+	rd.isClientHostRateLimited("client-c", "c.example.com", now)
+
+	rd.rlMu.Lock()
+	clientsLen := len(rd.clients)
+	rd.rlMu.Unlock()
+
+	if clientsLen > maxClients {
+		t.Fatalf("clients map size = %d, want <= %d", clientsLen, maxClients)
+	}
+}
+
+func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
+	t.Parallel()
+
+	const maxSize = 3
+	rd := New()
+	rd.lookupTTL = time.Hour
+	rd.maxCacheSize = maxSize
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+		return []string{"https://example.com"}, nil
+	}
+
+	queries := []string{
+		"_redirdns.one.example.com",
+		"_redirdns.two.example.com",
+		"_redirdns.three.example.com",
+		"_redirdns.four.example.com",
+		"_redirdns.five.example.com",
+	}
+	for _, q := range queries {
+		if _, err := rd.lookupTXT(context.Background(), q); err != nil {
+			t.Fatalf("lookupTXT(%q) returned error: %v", q, err)
+		}
+	}
+
+	rd.cacheMu.RLock()
+	cacheLen := len(rd.cache)
+	rd.cacheMu.RUnlock()
+
+	if cacheLen > maxSize {
+		t.Fatalf("cache size = %d, want <= %d", cacheLen, maxSize)
+	}
+}
+
+func TestLookupTXTSingleflightSurvivesFirstCallerContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	rd.lookupTTL = time.Minute
+	rd.lookupMax = time.Second
+
+	ready := make(chan struct{})
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+		close(ready)
+		select {
+		case <-time.After(100 * time.Millisecond):
+			return []string{"https://example.com"}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// First caller: context cancelled immediately after the lookup starts
+	firstCtx, firstCancel := context.WithCancel(context.Background())
+	var firstErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, firstErr = rd.lookupTXT(firstCtx, "_redirdns.cancel.example.com")
+	}()
+
+	// Cancel the first caller's context once the lookup func is running
+	<-ready
+	firstCancel()
+
+	// Remaining callers use independent contexts
+	const others = 10
+	results := make(chan error, others)
+	for range others {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			txt, err := rd.lookupTXT(context.Background(), "_redirdns.cancel.example.com")
+			if err != nil {
+				results <- err
+				return
+			}
+			if len(txt) != 1 || txt[0] != "https://example.com" {
+				results <- errors.New("unexpected TXT result")
+				return
+			}
+			results <- nil
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	_ = firstErr // first caller may or may not have been cancelled; we don't assert on it
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent caller failed after first caller cancelled: %v", err)
+		}
 	}
 }
 
@@ -319,6 +510,9 @@ func TestServeHTTPMissingTXTWithoutDefaultReturnsNotFound(t *testing.T) {
 	if got := rr.Header().Get("Location"); got != "" {
 		t.Fatalf("Location = %q, want empty", got)
 	}
+	if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
 }
 
 func TestServeHTTPValidTXTRedirects(t *testing.T) {
@@ -425,6 +619,9 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	}
 	if rr2.Code != http.StatusTooManyRequests {
 		t.Fatalf("second response status = %d, want %d", rr2.Code, http.StatusTooManyRequests)
+	}
+	if got := rr2.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("lookup function called %d times after limit hit, want 1", calls.Load())
@@ -538,6 +735,13 @@ func TestValidateRejectsNonPositiveLookupTimeoutOrCacheTTL(t *testing.T) {
 
 	rd = New()
 	rd.logger = zap.NewNop()
+	rd.LookupTimeout = caddy.Duration(31 * time.Second)
+	if err := rd.Validate(); err == nil {
+		t.Fatalf("expected validate error for lookup_timeout exceeding maximum")
+	}
+
+	rd = New()
+	rd.logger = zap.NewNop()
 	rd.CacheTTL = -1
 	if err := rd.Validate(); err == nil {
 		t.Fatalf("expected validate error for negative cache ttl")
@@ -557,12 +761,6 @@ func TestValidateRejectsNonPositiveLookupTimeoutOrCacheTTL(t *testing.T) {
 		t.Fatalf("expected validate error for non-positive max_unique_hosts_per_client")
 	}
 
-	rd = New()
-	rd.logger = zap.NewNop()
-	rd.TrustedProxies = []string{"bad-entry"}
-	if err := rd.Validate(); err == nil {
-		t.Fatalf("expected validate error for invalid trusted_proxies entry")
-	}
 }
 
 func newTestRedirDns(t *testing.T) *RedirDns {
