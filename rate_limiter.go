@@ -20,6 +20,12 @@ const (
 
 	// Default maximum number of tracked rate-limit clients
 	defaultMaxClients = 100_000
+
+	// Maximum number of bytes examined in an X-Forwarded-For header. The
+	// right-to-left walk only needs the tail of the header (the most recently
+	// appended entries), so any prefix beyond this limit is discarded before
+	// parsing to bound per-request CPU cost.
+	maxXFFBytes = 1024
 )
 
 // clientHostTracker records the set of unique hostnames a single client has requested
@@ -165,6 +171,9 @@ func (rd *RedirDns) clientIDFromRequest(r *http.Request) string {
 	// Rejecting private IPs would break all-internal deployments where clients
 	// and proxies all reside on RFC-1918 space.
 	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		if len(xff) > maxXFFBytes {
+			xff = xff[len(xff)-maxXFFBytes:]
+		}
 		for xff != "" {
 			var part string
 			if idx := strings.LastIndex(xff, ","); idx >= 0 {

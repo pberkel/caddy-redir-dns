@@ -217,7 +217,10 @@ func (rd *RedirDns) Validate() error {
 	for _, ns := range rd.Nameservers {
 		host, port, splitErr := net.SplitHostPort(ns)
 		if splitErr != nil {
-			// no port — entire value is the host
+			// no port — entire value is the host; port validation below is skipped.
+			// In the normal Caddy lifecycle Provision runs first and normalises all
+			// bare addresses to host:port form, so this branch is only reachable when
+			// Validate is called directly (e.g. in tests) without a prior Provision.
 			host = ns
 			port = ""
 		}

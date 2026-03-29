@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -85,7 +86,7 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
 			cacheTTL = dnsTTL
 		}
 		entry := dnsCacheEntry{
-			txt:       append([]string(nil), txt...),
+			txt:       txt, // fresh slice from lookupFunc/resolver; copied on read in cachedLookup and on return below
 			err:       err,
 			expiresAt: checkNow.Add(cacheTTL),
 		}
@@ -166,7 +167,7 @@ func newMiekgLookupFunc(nameservers []string) func(context.Context, string) ([]s
 			}
 			var (
 				records []string
-				minTTL  = ^uint32(0) // will be reduced to the smallest TTL seen
+				minTTL  = uint32(math.MaxUint32) // will be reduced to the smallest TTL seen
 			)
 			for _, rr := range resp.Answer {
 				if txt, ok := rr.(*dns.TXT); ok {
@@ -194,15 +195,13 @@ func newMiekgLookupFunc(nameservers []string) func(context.Context, string) ([]s
 // It prefers evicting an already-expired entry; if none exist it evicts the entry with the
 // soonest expiry (i.e. the one that would expire next).
 func (rd *RedirDns) evictOneCacheEntry(now time.Time) {
+	var soonestKey string
+	var soonestExpiry time.Time
 	for k, e := range rd.cache {
 		if now.After(e.expiresAt) {
 			delete(rd.cache, k)
 			return
 		}
-	}
-	var soonestKey string
-	var soonestExpiry time.Time
-	for k, e := range rd.cache {
 		if soonestKey == "" || e.expiresAt.Before(soonestExpiry) {
 			soonestKey = k
 			soonestExpiry = e.expiresAt

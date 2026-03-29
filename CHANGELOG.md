@@ -8,6 +8,9 @@
 
 ### Changed
 - Added doc comments and inline comments throughout `redir_dns.go` and `rate_limiter.go`, covering all previously undocumented functions and types.
+- `X-Forwarded-For` header processing now caps input to 1024 bytes (retaining the rightmost portion) to bound per-request CPU cost under adversarial header values.
+- `evictOneCacheEntry` merged from two sequential map iterations into one, halving the work when no expired entry is present.
+- Cache miss path in `lookupTXT` reduced from two defensive slice copies to one; the stored cache entry now holds the slice returned directly by the lookup function, and callers receive a copy only at read time.
 
 ## v1.1.3 — 2026-03-30
 

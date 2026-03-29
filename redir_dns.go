@@ -107,7 +107,8 @@ type RedirDns struct {
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 	// Custom DNS nameservers (hostnames or IPs, optional port) used for TXT lookups.
-	// When empty the system resolver is used. Multiple entries are selected round-robin.
+	// When empty the system resolver is used. Multiple entries are tried in order
+	// until one succeeds.
 	Nameservers []string `json:"nameservers,omitempty"`
 
 	// response rendering
