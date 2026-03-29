@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- `nameserver` configuration parameter accepts one or more custom DNS nameserver addresses (hostname or IP, with optional port). When configured, a `miekg/dns` client is used and the supplied servers are queried in order; the first successful response is returned. NXDOMAIN is treated as terminal and short-circuits any remaining servers. Multiple addresses may be given space-separated on a single line or across multiple `nameserver` lines. Addresses without an explicit port default to `:53`. When `nameserver` is absent the system resolver is used, as before.
+- DNS TXT record TTL is now honoured: when the TTL returned by the upstream resolver exceeds the configured `cache_ttl`, the larger value is used as the cache expiry. This prevents entries from being served from cache after the record's natural DNS TTL has elapsed while still respecting `cache_ttl` as a minimum.
+
 ### Changed
 - Added doc comments and inline comments throughout `redir_dns.go` and `rate_limiter.go`, covering all previously undocumented functions and types.
 

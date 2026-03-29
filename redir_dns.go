@@ -106,6 +106,9 @@ type RedirDns struct {
 	MaxClients StringOrInt `json:"max_clients,omitempty"`
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// Custom DNS nameservers (hostnames or IPs, optional port) used for TXT lookups.
+	// When empty the system resolver is used. Multiple entries are selected round-robin.
+	Nameservers []string `json:"nameservers,omitempty"`
 
 	// response rendering
 	responseTpl *template.Template
@@ -119,7 +122,7 @@ type RedirDns struct {
 	resolver     *net.Resolver
 	lookupTTL    time.Duration
 	lookupMax    time.Duration
-	lookupFunc   func(context.Context, string) ([]string, error) // overridden in tests
+	lookupFunc   func(context.Context, string) ([]string, time.Duration, error) // overridden in tests
 	cacheMu      sync.RWMutex
 	cache        map[string]dnsCacheEntry
 	maxCacheSize int

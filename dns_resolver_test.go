@@ -15,14 +15,14 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 	rd := New()
 	rd.lookupTTL = time.Minute
 	var calls atomic.Int64
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = ctx
 		_ = query
 		n := calls.Add(1)
 		if n == 1 {
-			return []string{"https://example.com"}, nil
+			return []string{"https://example.com"}, 0, nil
 		}
-		return nil, errors.New("unexpected second call for cached success")
+		return nil, 0, errors.New("unexpected second call for cached success")
 	}
 
 	txt, err := rd.lookupTXT("_redirdns.example.com")
@@ -46,11 +46,11 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 	rdErr := New()
 	rdErr.lookupTTL = time.Minute
 	var errCalls atomic.Int64
-	rdErr.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rdErr.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = ctx
 		_ = query
 		errCalls.Add(1)
-		return nil, errNoTXTRecord
+		return nil, 0, errNoTXTRecord
 	}
 
 	_, err = rdErr.lookupTXT("_redirdns.missing.example.com")
@@ -74,14 +74,14 @@ func TestLookupTXTSingleflightDedupesConcurrentCalls(t *testing.T) {
 	rd.lookupMax = time.Second
 
 	var calls atomic.Int64
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = query
 		calls.Add(1)
 		select {
 		case <-time.After(50 * time.Millisecond):
-			return []string{"https://example.org"}, nil
+			return []string{"https://example.org"}, 0, nil
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, 0, ctx.Err()
 		}
 	}
 
@@ -124,8 +124,8 @@ func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
 	rd := New()
 	rd.lookupTTL = time.Hour
 	rd.maxCacheSize = maxSize
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
-		return []string{"https://example.com"}, nil
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
+		return []string{"https://example.com"}, 0, nil
 	}
 
 	queries := []string{

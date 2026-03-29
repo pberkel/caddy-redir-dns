@@ -3,7 +3,11 @@ package redirdns
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 const (
@@ -60,22 +64,30 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
 		lookupCtx, cancel := context.WithTimeout(context.Background(), rd.lookupMax)
 		defer cancel()
 		var (
-			txt []string
-			err error
+			txt    []string
+			dnsTTL time.Duration
+			err    error
 		)
 		if rd.lookupFunc != nil {
-			txt, err = rd.lookupFunc(lookupCtx, query)
+			txt, dnsTTL, err = rd.lookupFunc(lookupCtx, query)
 		} else {
 			txt, err = rd.resolver.LookupTXT(lookupCtx, query)
+			// net.Resolver does not expose TTL; dnsTTL remains 0 so the
+			// configured cache_ttl is used unchanged
 		}
 		if err == nil && len(txt) == 0 {
 			err = errNoTXTRecord
 		}
 
+		// honour the DNS record TTL when it is larger than the configured cache TTL
+		cacheTTL := rd.lookupTTL
+		if dnsTTL > cacheTTL {
+			cacheTTL = dnsTTL
+		}
 		entry := dnsCacheEntry{
 			txt:       append([]string(nil), txt...),
 			err:       err,
-			expiresAt: checkNow.Add(rd.lookupTTL),
+			expiresAt: checkNow.Add(cacheTTL),
 		}
 		rd.storeLookup(query, entry)
 
@@ -123,6 +135,59 @@ func (rd *RedirDns) storeLookup(query string, entry dnsCacheEntry) {
 		rd.evictOneCacheEntry(time.Now())
 	}
 	rd.cache[query] = entry
+}
+
+// newMiekgLookupFunc returns a lookupFunc that queries the given nameservers using
+// a miekg/dns client. Nameservers must already be in host:port form. Each nameserver
+// is tried in order; the first successful response is returned. NXDOMAIN is treated as
+// terminal and short-circuits the remaining nameservers. A single dns.Client is shared
+// across all calls (it is safe for concurrent use).
+func newMiekgLookupFunc(nameservers []string) func(context.Context, string) ([]string, time.Duration, error) {
+	client := &dns.Client{}
+	return func(ctx context.Context, query string) ([]string, time.Duration, error) {
+		msg := new(dns.Msg)
+		msg.SetQuestion(dns.Fqdn(query), dns.TypeTXT)
+		msg.RecursionDesired = true
+
+		var lastErr error
+		for _, ns := range nameservers {
+			resp, _, err := client.ExchangeContext(ctx, msg, ns)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if resp.Rcode == dns.RcodeNameError {
+				// NXDOMAIN — record does not exist; no point querying remaining servers
+				return nil, 0, errNoTXTRecord
+			}
+			if resp.Rcode != dns.RcodeSuccess {
+				lastErr = fmt.Errorf("nameserver %s returned rcode %s", ns, dns.RcodeToString[resp.Rcode])
+				continue
+			}
+			var (
+				records []string
+				minTTL  = ^uint32(0) // will be reduced to the smallest TTL seen
+			)
+			for _, rr := range resp.Answer {
+				if txt, ok := rr.(*dns.TXT); ok {
+					// a single TXT resource record may contain multiple character-strings;
+					// RFC 1035 §3.3.14 specifies they are concatenated without separator
+					records = append(records, strings.Join(txt.Txt, ""))
+					if txt.Hdr.Ttl < minTTL {
+						minTTL = txt.Hdr.Ttl
+					}
+				}
+			}
+			if len(records) == 0 {
+				return nil, 0, errNoTXTRecord
+			}
+			return records, time.Duration(minTTL) * time.Second, nil
+		}
+		if lastErr != nil {
+			return nil, 0, lastErr
+		}
+		return nil, 0, errNoTXTRecord
+	}
 }
 
 // evictOneCacheEntry removes a single cache entry. It must be called with cacheMu write lock held.

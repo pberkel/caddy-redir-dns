@@ -124,7 +124,6 @@ func TestNormalizeRequestHost(t *testing.T) {
 	}
 }
 
-
 func TestParseTxtRecordWithoutReplacerContextDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
@@ -238,10 +237,10 @@ func TestServeHTTPLookupTimeoutFallsBackToDefaultTarget(t *testing.T) {
 	rd := newTestRedirDns(t)
 	rd.DefaultTarget = "https://default.example/"
 	rd.lookupMax = 20 * time.Millisecond
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = query
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return nil, 0, ctx.Err()
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/path", nil)
@@ -263,10 +262,10 @@ func TestServeHTTPMissingTXTWithoutDefaultReturnsNotFound(t *testing.T) {
 	t.Parallel()
 
 	rd := newTestRedirDns(t)
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = ctx
 		_ = query
-		return nil, errNoTXTRecord
+		return nil, 0, errNoTXTRecord
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/path", nil)
@@ -291,10 +290,10 @@ func TestServeHTTPValidTXTRedirects(t *testing.T) {
 	t.Parallel()
 
 	rd := newTestRedirDns(t)
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = ctx
 		_ = query
-		return []string{"https://redirect.example/new-path 308"}, nil
+		return []string{"https://redirect.example/new-path 308"}, 0, nil
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/old-path", nil)
@@ -321,11 +320,11 @@ func TestServeHTTPHostCardinalityRateLimitSkipsDNSLookup(t *testing.T) {
 	rd.rateWindow = time.Minute
 
 	var calls atomic.Int64
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = ctx
 		_ = query
 		calls.Add(1)
-		return nil, errNoTXTRecord
+		return nil, 0, errNoTXTRecord
 	}
 
 	makeReq := func(host string) *http.Request {
@@ -364,11 +363,11 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	rd.rateWindow = 30 * time.Millisecond
 
 	var calls atomic.Int64
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		_ = ctx
 		_ = query
 		calls.Add(1)
-		return nil, errNoTXTRecord
+		return nil, 0, errNoTXTRecord
 	}
 
 	makeReq := func(host string) *http.Request {

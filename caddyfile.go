@@ -95,6 +95,13 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	for i, p := range rd.TrustedProxies {
 		rd.TrustedProxies[i] = repl.ReplaceAll(p, "")
 	}
+	for i, ns := range rd.Nameservers {
+		ns = repl.ReplaceAll(ns, "")
+		if _, _, err := net.SplitHostPort(ns); err != nil {
+			ns = net.JoinHostPort(ns, "53")
+		}
+		rd.Nameservers[i] = ns
+	}
 
 	// parse duration fields
 	if rd.lookupMax, err = time.ParseDuration(rd.LookupTimeout); err != nil {
@@ -121,6 +128,10 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("invalid max_clients %q: %v", rd.MaxClients, err)
 	}
 
+	if len(rd.Nameservers) > 0 {
+		rd.lookupFunc = newMiekgLookupFunc(rd.Nameservers)
+	}
+
 	rd.trustedNets, err = parseTrustedProxyPrefixes(rd.TrustedProxies)
 	if err != nil {
 		return err
@@ -141,6 +152,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		zap.Duration("rate_window", rd.rateWindow),
 		zap.Int("max_unique_hosts_per_client", rd.maxHosts),
 		zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
+		zap.Int("nameserver_entries", len(rd.Nameservers)),
 	)
 
 	rd.startRateLimiterCleanup(ctx)
@@ -202,6 +214,23 @@ func (rd *RedirDns) Validate() error {
 	if err != nil || maxClients <= 0 {
 		return fmt.Errorf("max_clients must be greater than 0")
 	}
+	for _, ns := range rd.Nameservers {
+		host, port, splitErr := net.SplitHostPort(ns)
+		if splitErr != nil {
+			// no port — entire value is the host
+			host = ns
+			port = ""
+		}
+		if net.ParseIP(host) == nil && !isValidDNSHost(host) {
+			return fmt.Errorf("invalid nameserver address %q", ns)
+		}
+		if port != "" {
+			p, err := strconv.Atoi(port)
+			if err != nil || p < 1 || p > 65535 {
+				return fmt.Errorf("invalid port in nameserver address %q", ns)
+			}
+		}
+	}
 	return nil
 }
 
@@ -262,6 +291,14 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				rd.TrustedProxies = append(rd.TrustedProxies, d.Val())
 				for d.NextArg() {
 					rd.TrustedProxies = append(rd.TrustedProxies, d.Val())
+				}
+			case "nameserver":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.Nameservers = append(rd.Nameservers, d.Val())
+				for d.NextArg() {
+					rd.Nameservers = append(rd.Nameservers, d.Val())
 				}
 			default:
 				return d.Errf("unrecognized configuration option %q", d.Val())
