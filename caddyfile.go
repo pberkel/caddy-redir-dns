@@ -3,6 +3,7 @@ package redirdns
 import (
 	"fmt"
 	"html/template"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,44 @@ func init() {
 	caddy.RegisterModule(&RedirDns{})
 	httpcaddyfile.RegisterHandlerDirective("redir_dns", parseCaddyfile)
 	httpcaddyfile.RegisterDirectiveOrder("redir_dns", httpcaddyfile.After, "redir")
+}
+
+// New returns a RedirDns instance pre-populated with all default values.
+// Both the public config fields and the corresponding unexported runtime fields
+// are initialised so that the struct is usable without calling Provision first
+// (e.g. in tests).
+func New() *RedirDns {
+	rd := RedirDns{
+		DnsPrefix:               defaultDnsPrefix,
+		StatusCode:              StringOrInt(strconv.Itoa(defaultStatusCode)),
+		LookupTimeout:           defaultDnsLookupTimeout.String(),
+		CacheTTL:                defaultDnsCacheTTL.String(),
+		RateWindow:              defaultRateLimitWindow.String(),
+		MaxUniqueHostsPerClient: StringOrInt(strconv.Itoa(defaultMaxUniqueHostsPerClient)),
+		MaxCacheSize:            StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
+		MaxClients:              StringOrInt(strconv.Itoa(defaultMaxClients)),
+		resolver:                net.DefaultResolver,
+		statusCode:              defaultStatusCode,
+		lookupTTL:               defaultDnsCacheTTL,
+		lookupMax:               defaultDnsLookupTimeout,
+		cache:                   make(map[string]dnsCacheEntry),
+		maxCacheSize:            defaultMaxCacheSize,
+		clients:                 make(map[string]*clientHostTracker),
+		maxClients:              defaultMaxClients,
+		rateWindow:              defaultRateLimitWindow,
+		maxHosts:                defaultMaxUniqueHostsPerClient,
+	}
+	return &rd
+}
+
+// CaddyModule returns the Caddy module information
+func (*RedirDns) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID: "http.handlers.redir_dns",
+		New: func() caddy.Module {
+			return New()
+		},
+	}
 }
 
 // Provision implements caddy.Provisioner

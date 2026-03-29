@@ -1,0 +1,149 @@
+package redirdns
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+const (
+	// Default DNS lookup timeout per request
+	defaultDnsLookupTimeout = 500 * time.Millisecond
+
+	// Maximum allowed DNS lookup timeout — guards against goroutine accumulation
+	// since lookups run on context.Background() and are not bounded by request lifetime
+	maxLookupTimeout = 30 * time.Second
+
+	// Default DNS TXT cache TTL
+	defaultDnsCacheTTL = 30 * time.Second
+
+	// Default maximum number of DNS TXT cache entries
+	defaultMaxCacheSize = 10_000
+)
+
+// errNoTXTRecord is returned by the resolver when a DNS query succeeds but returns
+// no TXT records. It is also cached so that repeat lookups for non-existent records
+// do not hammer the upstream resolver.
+var errNoTXTRecord = errors.New("no TXT DNS record found")
+
+// dnsCacheEntry holds the result of a DNS TXT lookup together with its expiry time.
+// Both successful results and errors are cached so that repeated lookups for
+// non-existent or broken records do not hammer the upstream resolver.
+type dnsCacheEntry struct {
+	txt       []string
+	err       error
+	expiresAt time.Time
+}
+
+// lookupTXT returns the DNS TXT records for query, serving from the in-memory cache
+// when a fresh entry exists. Concurrent requests for the same query are coalesced by
+// singleflight so that only one upstream DNS lookup is issued regardless of how many
+// requests arrive simultaneously.
+func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
+	now := time.Now()
+	if txt, err, found := rd.cachedLookup(query, now); found {
+		return txt, err
+	}
+
+	value, _, _ := rd.lookupGroup.Do(query, func() (any, error) {
+		// re-check the cache inside the singleflight closure: a previous call for the
+		// same key may have populated it between the outer cache miss and acquiring the
+		// singleflight slot
+		checkNow := time.Now()
+		if txt, err, found := rd.cachedLookup(query, checkNow); found {
+			return dnsCacheEntry{txt: txt, err: err}, nil
+		}
+
+		// DNS lookups run on context.Background() with a fixed timeout, deliberately
+		// decoupled from the request context so that cancellation of one caller's
+		// request does not abort the lookup for all other waiting callers
+		lookupCtx, cancel := context.WithTimeout(context.Background(), rd.lookupMax)
+		defer cancel()
+		var (
+			txt []string
+			err error
+		)
+		if rd.lookupFunc != nil {
+			txt, err = rd.lookupFunc(lookupCtx, query)
+		} else {
+			txt, err = rd.resolver.LookupTXT(lookupCtx, query)
+		}
+		if err == nil && len(txt) == 0 {
+			err = errNoTXTRecord
+		}
+
+		entry := dnsCacheEntry{
+			txt:       append([]string(nil), txt...),
+			err:       err,
+			expiresAt: checkNow.Add(rd.lookupTTL),
+		}
+		rd.storeLookup(query, entry)
+
+		return entry, nil
+	})
+
+	// two-value assertion: if the singleflight call returned a zero value (e.g. due
+	// to an unexpected panic in a concurrent caller), entry is the zero dnsCacheEntry
+	// which is treated as a cache miss rather than crashing the server
+	entry, _ := value.(dnsCacheEntry)
+	return append([]string(nil), entry.txt...), entry.err
+}
+
+// cachedLookup returns the cached TXT records for query if a non-expired entry exists.
+// Expired entries are removed under a write lock using a double-checked pattern: the
+// entry is read under a read lock first, then re-examined under a write lock before
+// deletion so that a concurrent writer that already refreshed the entry is not evicted.
+func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, bool) {
+	rd.cacheMu.RLock()
+	entry, ok := rd.cache[query]
+	rd.cacheMu.RUnlock()
+	if !ok {
+		return nil, nil, false
+	}
+	if now.After(entry.expiresAt) {
+		// upgrade to write lock and re-check before deleting to avoid racing with
+		// a concurrent lookup that may have already stored a fresh entry
+		rd.cacheMu.Lock()
+		if current, exists := rd.cache[query]; exists && now.After(current.expiresAt) {
+			delete(rd.cache, query)
+		}
+		rd.cacheMu.Unlock()
+		return nil, nil, false
+	}
+
+	return append([]string(nil), entry.txt...), entry.err, true
+}
+
+// storeLookup writes entry into the cache under the write lock, evicting one existing
+// entry first if the cache is at capacity and query is not already present.
+func (rd *RedirDns) storeLookup(query string, entry dnsCacheEntry) {
+	rd.cacheMu.Lock()
+	defer rd.cacheMu.Unlock()
+	if _, exists := rd.cache[query]; !exists && len(rd.cache) >= rd.maxCacheSize {
+		rd.evictOneCacheEntry(time.Now())
+	}
+	rd.cache[query] = entry
+}
+
+// evictOneCacheEntry removes a single cache entry. It must be called with cacheMu write lock held.
+// It prefers evicting an already-expired entry; if none exist it evicts the entry with the
+// soonest expiry (i.e. the one that would expire next).
+func (rd *RedirDns) evictOneCacheEntry(now time.Time) {
+	for k, e := range rd.cache {
+		if now.After(e.expiresAt) {
+			delete(rd.cache, k)
+			return
+		}
+	}
+	var soonestKey string
+	var soonestExpiry time.Time
+	for k, e := range rd.cache {
+		if soonestKey == "" || e.expiresAt.Before(soonestExpiry) {
+			soonestKey = k
+			soonestExpiry = e.expiresAt
+		}
+	}
+	if soonestKey != "" {
+		delete(rd.cache, soonestKey)
+	}
+}

@@ -11,6 +11,17 @@ import (
 	"github.com/caddyserver/caddy/v2"
 )
 
+const (
+	// Default per-client window for unique host tracking
+	defaultRateLimitWindow = time.Minute
+
+	// Default maximum unique hosts per client in a window
+	defaultMaxUniqueHostsPerClient = 50
+
+	// Default maximum number of tracked rate-limit clients
+	defaultMaxClients = 100_000
+)
+
 // clientHostTracker records the set of unique hostnames a single client has requested
 // within the current rate-limit window, together with the time each was last seen.
 // lastSeen is updated on every request and is used by the background cleanup goroutine
