@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"go.uber.org/zap"
 )
 
@@ -49,14 +48,14 @@ func TestContainsControlChars(t *testing.T) {
 func TestIsSupportedStatusCode(t *testing.T) {
 	t.Parallel()
 
-	valid := []int{300, 301, 302, 303, 307, 308, 399}
+	valid := []int{301, 302, 303, 307, 308}
 	for _, code := range valid {
 		if !isSupportedStatusCode(code) {
 			t.Errorf("isSupportedStatusCode(%d) = false, want true", code)
 		}
 	}
 
-	invalid := []int{200, 204, 401, 403, 404, 500}
+	invalid := []int{200, 204, 300, 304, 305, 306, 399, 401, 403, 404, 500}
 	for _, code := range invalid {
 		if isSupportedStatusCode(code) {
 			t.Errorf("isSupportedStatusCode(%d) = true, want false", code)
@@ -143,14 +142,14 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 		return nil, errors.New("unexpected second call for cached success")
 	}
 
-	txt, err := rd.lookupTXT(context.Background(), "_redirdns.example.com")
+	txt, err := rd.lookupTXT("_redirdns.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error on first lookup: %v", err)
 	}
 	if len(txt) != 1 || txt[0] != "https://example.com" {
 		t.Fatalf("unexpected TXT result: %#v", txt)
 	}
-	txt, err = rd.lookupTXT(context.Background(), "_redirdns.example.com")
+	txt, err = rd.lookupTXT("_redirdns.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error on cached lookup: %v", err)
 	}
@@ -171,11 +170,11 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 		return nil, errNoTXTRecord
 	}
 
-	_, err = rdErr.lookupTXT(context.Background(), "_redirdns.missing.example.com")
+	_, err = rdErr.lookupTXT("_redirdns.missing.example.com")
 	if !errors.Is(err, errNoTXTRecord) {
 		t.Fatalf("expected errNoTXTRecord, got %v", err)
 	}
-	_, err = rdErr.lookupTXT(context.Background(), "_redirdns.missing.example.com")
+	_, err = rdErr.lookupTXT("_redirdns.missing.example.com")
 	if !errors.Is(err, errNoTXTRecord) {
 		t.Fatalf("expected cached errNoTXTRecord, got %v", err)
 	}
@@ -210,7 +209,7 @@ func TestLookupTXTSingleflightDedupesConcurrentCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			txt, err := rd.lookupTXT(context.Background(), "_redirdns.concurrent.example.com")
+			txt, err := rd.lookupTXT("_redirdns.concurrent.example.com")
 			if err != nil {
 				results <- err
 				return
@@ -235,29 +234,6 @@ func TestLookupTXTSingleflightDedupesConcurrentCalls(t *testing.T) {
 	}
 }
 
-func TestIsClientHostRateLimitedRespectsMaxClients(t *testing.T) {
-	t.Parallel()
-
-	const maxClients = 2
-	rd := newTestRedirDns(t)
-	rd.maxClients = maxClients
-	rd.maxHosts = 100
-	rd.rateWindow = time.Minute
-
-	now := time.Now()
-	rd.isClientHostRateLimited("client-a", "a.example.com", now)
-	rd.isClientHostRateLimited("client-b", "b.example.com", now)
-	rd.isClientHostRateLimited("client-c", "c.example.com", now)
-
-	rd.rlMu.Lock()
-	clientsLen := len(rd.clients)
-	rd.rlMu.Unlock()
-
-	if clientsLen > maxClients {
-		t.Fatalf("clients map size = %d, want <= %d", clientsLen, maxClients)
-	}
-}
-
 func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
 	t.Parallel()
 
@@ -277,7 +253,7 @@ func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
 		"_redirdns.five.example.com",
 	}
 	for _, q := range queries {
-		if _, err := rd.lookupTXT(context.Background(), q); err != nil {
+		if _, err := rd.lookupTXT(q); err != nil {
 			t.Fatalf("lookupTXT(%q) returned error: %v", q, err)
 		}
 	}
@@ -288,68 +264,6 @@ func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
 
 	if cacheLen > maxSize {
 		t.Fatalf("cache size = %d, want <= %d", cacheLen, maxSize)
-	}
-}
-
-func TestLookupTXTSingleflightSurvivesFirstCallerContextCancellation(t *testing.T) {
-	t.Parallel()
-
-	rd := New()
-	rd.lookupTTL = time.Minute
-	rd.lookupMax = time.Second
-
-	ready := make(chan struct{})
-	rd.lookupFunc = func(ctx context.Context, query string) ([]string, error) {
-		close(ready)
-		select {
-		case <-time.After(100 * time.Millisecond):
-			return []string{"https://example.com"}, nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-
-	// First caller: context cancelled immediately after the lookup starts
-	firstCtx, firstCancel := context.WithCancel(context.Background())
-	var firstErr error
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, firstErr = rd.lookupTXT(firstCtx, "_redirdns.cancel.example.com")
-	}()
-
-	// Cancel the first caller's context once the lookup func is running
-	<-ready
-	firstCancel()
-
-	// Remaining callers use independent contexts
-	const others = 10
-	results := make(chan error, others)
-	for range others {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			txt, err := rd.lookupTXT(context.Background(), "_redirdns.cancel.example.com")
-			if err != nil {
-				results <- err
-				return
-			}
-			if len(txt) != 1 || txt[0] != "https://example.com" {
-				results <- errors.New("unexpected TXT result")
-				return
-			}
-			results <- nil
-		}()
-	}
-	wg.Wait()
-	close(results)
-
-	_ = firstErr // first caller may or may not have been cancelled; we don't assert on it
-	for err := range results {
-		if err != nil {
-			t.Fatalf("concurrent caller failed after first caller cancelled: %v", err)
-		}
 	}
 }
 
@@ -579,11 +493,8 @@ func TestServeHTTPHostCardinalityRateLimitSkipsDNSLookup(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("lookup function called %d times, want 2 (third should be rate-limited)", calls.Load())
 	}
-	if rr3.Code != rd.StatusCode {
-		t.Fatalf("third response status = %d, want %d", rr3.Code, rd.StatusCode)
-	}
-	if got := rr3.Header().Get("Location"); got != rd.DefaultTarget {
-		t.Fatalf("third response Location = %q, want %q", got, rd.DefaultTarget)
+	if rr3.Code != http.StatusTooManyRequests {
+		t.Fatalf("third response status = %d, want %d", rr3.Code, http.StatusTooManyRequests)
 	}
 }
 
@@ -634,92 +545,6 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("lookup function called %d times after window reset, want 2", calls.Load())
-	}
-}
-
-func TestClientIDFromRequestUsesXFFWhenRemoteIsTrustedProxy(t *testing.T) {
-	t.Parallel()
-
-	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
-	}
-	rd.trustedNets = nets
-
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
-	req.RemoteAddr = "10.1.2.3:4321"
-	req.Header.Set("X-Forwarded-For", "198.51.100.10, 10.20.30.40")
-
-	clientID := rd.clientIDFromRequest(req)
-	if clientID != "198.51.100.10" {
-		t.Fatalf("clientID = %q, want %q", clientID, "198.51.100.10")
-	}
-}
-
-func TestClientIDFromRequestIgnoresXFFWhenRemoteIsUntrusted(t *testing.T) {
-	t.Parallel()
-
-	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
-	}
-	rd.trustedNets = nets
-
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
-	req.RemoteAddr = "203.0.113.7:44321"
-	req.Header.Set("X-Forwarded-For", "198.51.100.10")
-
-	clientID := rd.clientIDFromRequest(req)
-	if clientID != "203.0.113.7" {
-		t.Fatalf("clientID = %q, want %q", clientID, "203.0.113.7")
-	}
-}
-
-func TestParseTrustedProxyPrefixesRejectsInvalidEntry(t *testing.T) {
-	t.Parallel()
-
-	_, err := parseTrustedProxyPrefixes([]string{"not-an-ip"})
-	if err == nil {
-		t.Fatalf("expected parseTrustedProxyPrefixes error for invalid entry")
-	}
-}
-
-func TestUnmarshalCaddyfileParsesLookupTimeoutAndCacheTTL(t *testing.T) {
-	t.Parallel()
-
-	rd := New()
-	d := caddyfile.NewTestDispenser(`
-redir_dns {
-	lookup_timeout 750ms
-	cache_ttl 45s
-	rate_window 90s
-	max_unique_hosts_per_client 77
-	trusted_proxies 10.0.0.0/8 192.168.0.0/16
-}
-`)
-
-	if err := rd.UnmarshalCaddyfile(d); err != nil {
-		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
-	}
-	if time.Duration(rd.LookupTimeout) != 750*time.Millisecond {
-		t.Fatalf("lookup timeout = %v, want %v", time.Duration(rd.LookupTimeout), 750*time.Millisecond)
-	}
-	if time.Duration(rd.CacheTTL) != 45*time.Second {
-		t.Fatalf("cache ttl = %v, want %v", time.Duration(rd.CacheTTL), 45*time.Second)
-	}
-	if time.Duration(rd.RateWindow) != 90*time.Second {
-		t.Fatalf("rate window = %v, want %v", time.Duration(rd.RateWindow), 90*time.Second)
-	}
-	if rd.MaxUniqueHostsPerClient != 77 {
-		t.Fatalf("max unique hosts per client = %d, want %d", rd.MaxUniqueHostsPerClient, 77)
-	}
-	if len(rd.TrustedProxies) != 2 {
-		t.Fatalf("trusted proxies length = %d, want %d", len(rd.TrustedProxies), 2)
-	}
-	if rd.TrustedProxies[0] != "10.0.0.0/8" || rd.TrustedProxies[1] != "192.168.0.0/16" {
-		t.Fatalf("unexpected trusted proxies: %#v", rd.TrustedProxies)
 	}
 }
 

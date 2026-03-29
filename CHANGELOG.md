@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.2 — 2026-03-29
+
+### Added
+- `X-Real-IP` header is now accepted as a fallback client identifier when the direct peer is a trusted proxy and no usable `X-Forwarded-For` entry is present. This supports nginx and other proxies that set `X-Real-IP` instead of `X-Forwarded-For`.
+
+### Changed
+- HTTP redirect status codes are now restricted to an explicit allowlist: `301`, `302`, `303`, `307`, and `308`. Previously all `3xx` codes were accepted, including `300` (Multiple Choices), `304` (Not Modified), `305` (Use Proxy, deprecated), and `306` (Switch Proxy, obsolete).
+- `X-Forwarded-For` is now walked right-to-left without allocating a string slice, reducing per-request allocations on trusted-proxy deployments.
+- Client identification now fails closed: requests with an unparseable `RemoteAddr` are treated as rate-limited rather than being assigned to a shared `"unknown"` bucket.
+- `clientIDFromRequest` is now called inside `isClientHostRateLimited`, ensuring client IP extraction is skipped entirely when rate-limiting is disabled.
+- Per-client rate-limit state cleanup (expired host entries and idle client trackers) has been moved from the request path to a background goroutine that runs every `rate_window`. This eliminates an O(clients × hosts) sweep under the rate-limit mutex that previously caused latency spikes at the cleanup boundary.
+- Client eviction when the `max_clients` cap is reached is now O(1) (single map iteration) rather than O(n) (full scan for oldest `lastSeen`).
+- `isValidDNSHost` now uses `strings.SplitSeq` to avoid a slice allocation per hostname validation.
+- `lookupTXT` no longer accepts a `context.Context` parameter. DNS lookups always run on an internal timeout context derived from `context.Background()`, decoupled from any caller context. The function signature now makes this explicit.
+- The `singleflight` result type assertion is now non-panicking: a failed assertion returns an empty result, which is treated as a cache miss rather than crashing the server.
+
+### Security
+- Private, loopback, and link-local addresses appearing in `X-Forwarded-For` or `X-Real-IP` are now accepted as client identifiers when the direct peer is trusted. Previously they were rejected, causing all clients behind an all-private-network proxy to share the proxy's IP as their rate-limit bucket.
+
 ## v1.1.1 — 2026-03-27
 
 ### Added
