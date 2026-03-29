@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Added doc comments and inline comments throughout `redir_dns.go` and `rate_limiter.go`, covering all previously undocumented functions and types.
+
 ## v1.1.3 — 2026-03-30
 
 ### Added

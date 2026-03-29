@@ -11,8 +11,12 @@ import (
 	"github.com/caddyserver/caddy/v2"
 )
 
+// clientHostTracker records the set of unique hostnames a single client has requested
+// within the current rate-limit window, together with the time each was last seen.
+// lastSeen is updated on every request and is used by the background cleanup goroutine
+// to identify trackers that have been idle for longer than rateWindow.
 type clientHostTracker struct {
-	hosts    map[string]time.Time
+	hosts    map[string]time.Time // hostname → time last requested
 	lastSeen time.Time
 }
 
@@ -36,6 +40,18 @@ func (rd *RedirDns) startRateLimiterCleanup(ctx caddy.Context) {
 	}()
 }
 
+// isClientHostRateLimited reports whether the client that sent r has exceeded the
+// unique-host cardinality limit for the current sliding window. It returns true
+// (rate-limited) in the following cases:
+//   - the client's remote address cannot be parsed (fail-closed)
+//   - the client has already requested maxHosts distinct hostnames within rateWindow
+//
+// A hostname the client has requested before is always allowed through and its
+// timestamp is refreshed, so the limit applies only to the number of distinct hosts
+// within the window, not to repeat visits to the same host.
+//
+// Rate limiting is skipped entirely (returns false) when maxHosts or rateWindow is
+// not positive, allowing the feature to be effectively disabled.
 func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now time.Time) bool {
 	if rd.maxHosts <= 0 || rd.rateWindow <= 0 {
 		return false
@@ -50,6 +66,7 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 
 	tracker, ok := rd.clients[clientID]
 	if !ok {
+		// evict one entry before inserting a new one to keep the map within maxClients
 		if len(rd.clients) >= rd.maxClients {
 			rd.evictOneClient()
 		}
@@ -59,6 +76,9 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 		rd.clients[clientID] = tracker
 	}
 
+	// sweep expired host entries for this client on the request path; the background
+	// goroutine handles full cleanup periodically, but this keeps per-client state
+	// accurate without waiting for the next tick
 	for h, seenAt := range tracker.hosts {
 		if now.Sub(seenAt) > rd.rateWindow {
 			delete(tracker.hosts, h)
@@ -67,6 +87,7 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 	tracker.lastSeen = now
 
 	if _, exists := tracker.hosts[host]; exists {
+		// client has visited this host before within the window — refresh and allow
 		tracker.hosts[host] = now
 		return false
 	}
@@ -105,6 +126,12 @@ func (rd *RedirDns) cleanupRateLimitState(now time.Time) {
 	}
 }
 
+// clientIDFromRequest derives a stable client identifier (an IP address string) from r.
+// When the direct peer is not a trusted proxy the peer's IP is used directly.
+// When the direct peer is trusted, X-Forwarded-For is walked right-to-left to find
+// the rightmost non-trusted address; X-Real-IP is tried as a fallback if XFF is absent.
+// Returns an empty string if r.RemoteAddr cannot be parsed; callers treat this as
+// rate-limited (fail-closed).
 func (rd *RedirDns) clientIDFromRequest(r *http.Request) string {
 	remoteIP, ok := parseRemoteAddr(r.RemoteAddr)
 	if !ok {
@@ -160,6 +187,7 @@ func (rd *RedirDns) clientIDFromRequest(r *http.Request) string {
 	return remoteIP.String()
 }
 
+// isTrustedProxy reports whether addr falls within any of the configured trusted proxy prefixes.
 func (rd *RedirDns) isTrustedProxy(addr netip.Addr) bool {
 	for _, prefix := range rd.trustedNets {
 		if prefix.Contains(addr) {
@@ -170,6 +198,11 @@ func (rd *RedirDns) isTrustedProxy(addr netip.Addr) bool {
 	return false
 }
 
+// parseTrustedProxyPrefixes converts a slice of CIDR strings or bare IP addresses into
+// a slice of netip.Prefix values. Bare IP addresses are converted to host prefixes
+// (/32 for IPv4, /128 for IPv6). CIDR prefixes are masked to their network address so
+// that a host bit set in the input (e.g. "10.0.0.1/8") does not cause a mismatch.
+// Returns nil for an empty input without error.
 func parseTrustedProxyPrefixes(values []string) ([]netip.Prefix, error) {
 	if len(values) == 0 {
 		return nil, nil

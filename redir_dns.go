@@ -78,6 +78,7 @@ var (
 // to bare numbers for backward compatibility.
 type StringOrInt string
 
+// UnmarshalJSON accepts either a bare JSON number or a quoted string.
 func (s *StringOrInt) UnmarshalJSON(b []byte) error {
 	var n int
 	if err := json.Unmarshal(b, &n); err == nil {
@@ -92,6 +93,8 @@ func (s *StringOrInt) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// MarshalJSON emits a bare JSON number when the stored value is purely numeric,
+// and a quoted string otherwise, preserving backward-compatible JSON round-trips.
 func (s StringOrInt) MarshalJSON() ([]byte, error) {
 	if _, err := strconv.Atoi(string(s)); err == nil {
 		return []byte(string(s)), nil
@@ -99,6 +102,9 @@ func (s StringOrInt) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(s))
 }
 
+// dnsCacheEntry holds the result of a DNS TXT lookup together with its expiry time.
+// Both successful results and errors are cached so that repeated lookups for
+// non-existent or broken records do not hammer the upstream resolver.
 type dnsCacheEntry struct {
 	txt       []string
 	err       error
@@ -134,29 +140,39 @@ type RedirDns struct {
 	MaxClients StringOrInt `json:"max_clients,omitempty"`
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
-	// The HTML response document served when the redirect cannot be completed
-	responseTpl  *template.Template
-	logger       *zap.Logger
-	statusCode   int
-	replacer     *strings.Replacer
-	resolver     *net.Resolver
-	lookupTTL    time.Duration
-	lookupMax    time.Duration
-	lookupFunc   func(context.Context, string) ([]string, error)
-	cacheMu      sync.RWMutex
-	cache        map[string]dnsCacheEntry
+
+	// response rendering
+	responseTpl *template.Template
+	logger      *zap.Logger
+
+	// redirect
+	statusCode int
+	replacer   *strings.Replacer // shorthand → expanded placeholder pre-processor
+
+	// DNS lookup
+	resolver    *net.Resolver
+	lookupTTL   time.Duration
+	lookupMax   time.Duration
+	lookupFunc  func(context.Context, string) ([]string, error) // overridden in tests
+	cacheMu     sync.RWMutex
+	cache       map[string]dnsCacheEntry
 	maxCacheSize int
-	lookupGroup  singleflight.Group
-	rlMu         sync.Mutex
-	clients      map[string]*clientHostTracker
-	maxClients   int
-	rateWindow   time.Duration
-	maxHosts     int
-	trustedNets  []netip.Prefix
+	lookupGroup singleflight.Group
+
+	// rate limiting
+	rlMu        sync.Mutex
+	clients     map[string]*clientHostTracker
+	maxClients  int
+	rateWindow  time.Duration
+	maxHosts    int
+	trustedNets []netip.Prefix
 }
 
+// New returns a RedirDns instance pre-populated with all default values.
+// Both the public config fields and the corresponding unexported runtime fields
+// are initialised so that the struct is usable without calling Provision first
+// (e.g. in tests).
 func New() *RedirDns {
-	// create and return new RedirDns struct with default values
 	rd := RedirDns{
 		DnsPrefix:               defaultDnsPrefix,
 		StatusCode:              StringOrInt(strconv.Itoa(defaultStatusCode)),
@@ -263,6 +279,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		"Redirect Failed", "Unable to determine redirect target")
 }
 
+// writeRedirectResponse writes a redirect response with the given status code and Location header.
 func writeRedirectResponse(w http.ResponseWriter, statusCode int, location string) error {
 	w.Header().Set("Location", location)
 	w.WriteHeader(statusCode)
@@ -270,6 +287,7 @@ func writeRedirectResponse(w http.ResponseWriter, statusCode int, location strin
 	return nil
 }
 
+// writeHtmlResponse renders the HTML error page template with the given status code, title, and message.
 func (rd *RedirDns) writeHtmlResponse(w http.ResponseWriter, statusCode int, title, msg string) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -282,16 +300,29 @@ func (rd *RedirDns) writeHtmlResponse(w http.ResponseWriter, statusCode int, tit
 	return rd.responseTpl.Execute(w, data)
 }
 
+// parseTxtRecord parses a single DNS TXT record value into a redirect target URL and
+// HTTP status code. Placeholder expansion is performed in two passes:
+//
+//  1. rd.replacer rewrites shorthand tokens (e.g. "{host}") to their expanded Caddy
+//     equivalents (e.g. "{http.request.host}") so that either form works in TXT records.
+//  2. The per-request Caddy replacer substitutes the expanded tokens with live request
+//     values. Only an explicit allowlist of request-derived placeholders is accepted;
+//     all others are replaced with an empty string to prevent accidental data leakage.
+//
+// Returns an empty target string if the TXT record does not contain a valid redirect.
 func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Request) (string, int) {
-	// expand and replace shortcode placeholder values
+	// first pass: rewrite shorthand tokens to full Caddy placeholder names
 	replaced := rd.replacer.Replace(record)
+
+	// second pass: substitute live request values via the per-request Caddy replacer
 	replVal := r.Context().Value(caddy.ReplacerCtxKey)
 	repl, ok := replVal.(*caddy.Replacer)
 	if !ok || repl == nil {
 		rd.logger.Debug("Dynamic placeholder expansion skipped because request replacer context is unavailable")
 	} else {
 		replaced, _ = repl.ReplaceFunc(replaced, func(key string, val any) (any, error) {
-			// hostname component labels (seperated by dots)
+			// {labels.N} and {http.request.host.labels.N} index hostname labels right-to-left:
+			// index 0 is the TLD, 1 is the second-level domain, etc.
 			if strings.HasPrefix(key, "http.request.host.labels.") {
 				key = strings.Replace(key, "http.request.host.labels.", "labels.", 1)
 			}
@@ -304,9 +335,12 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 				if idx >= len(components) {
 					return "", nil
 				}
+				// reverse the index so that 0 = rightmost label (TLD)
 				return strings.ToLower(components[len(components)-idx-1]), nil
 			}
-			// for security reasons, only replace the following placeholders
+			// for security reasons, only substitute the following request-derived placeholders;
+			// any other key is blanked out rather than passed through to prevent leaking
+			// internal Caddy state (e.g. vars, env, auth) into redirect Location headers
 			switch key {
 			case "http.request.scheme",
 				"http.request.host",
@@ -327,12 +361,14 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 			}
 		})
 	}
-	// set default return values
+
 	targetUrl := ""
 	statusCode := rd.statusCode
-	// split the expanded record on whitespace
+
+	// split the expanded record on whitespace; format is: "<url> [<status>]"
 	parts := strings.Fields(replaced)
-	// First part (manditory) should be the target URL
+
+	// first token (mandatory): the redirect target URL
 	if len(parts) > 0 {
 		if isValidAbsoluteURL(parts[0]) && !containsNonPrintableASCII(parts[0]) {
 			targetUrl = parts[0]
@@ -340,7 +376,8 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 			rd.logger.Debug("Rejected DNS TXT redirect candidate because target is not a valid absolute HTTP/HTTPS URL")
 		}
 	}
-	// Second part (optional) could be the status code
+
+	// second token (optional): numeric status code or the keywords "permanent" / "temporary"
 	if len(parts) > 1 {
 		switch parts[1] {
 		case "permanent":
@@ -361,6 +398,10 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 	return targetUrl, statusCode
 }
 
+// lookupTXT returns the DNS TXT records for query, serving from the in-memory cache
+// when a fresh entry exists. Concurrent requests for the same query are coalesced by
+// singleflight so that only one upstream DNS lookup is issued regardless of how many
+// requests arrive simultaneously.
 func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
 	now := time.Now()
 	if txt, err, found := rd.cachedLookup(query, now); found {
@@ -368,11 +409,17 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
 	}
 
 	value, _, _ := rd.lookupGroup.Do(query, func() (any, error) {
+		// re-check the cache inside the singleflight closure: a previous call for the
+		// same key may have populated it between the outer cache miss and acquiring the
+		// singleflight slot
 		checkNow := time.Now()
 		if txt, err, found := rd.cachedLookup(query, checkNow); found {
 			return dnsCacheEntry{txt: txt, err: err}, nil
 		}
 
+		// DNS lookups run on context.Background() with a fixed timeout, deliberately
+		// decoupled from the request context so that cancellation of one caller's
+		// request does not abort the lookup for all other waiting callers
 		lookupCtx, cancel := context.WithTimeout(context.Background(), rd.lookupMax)
 		defer cancel()
 		var (
@@ -398,10 +445,17 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
 		return entry, nil
 	})
 
+	// two-value assertion: if the singleflight call returned a zero value (e.g. due
+	// to an unexpected panic in a concurrent caller), entry is the zero dnsCacheEntry
+	// which is treated as a cache miss rather than crashing the server
 	entry, _ := value.(dnsCacheEntry)
 	return append([]string(nil), entry.txt...), entry.err
 }
 
+// cachedLookup returns the cached TXT records for query if a non-expired entry exists.
+// Expired entries are removed under a write lock using a double-checked pattern: the
+// entry is read under a read lock first, then re-examined under a write lock before
+// deletion so that a concurrent writer that already refreshed the entry is not evicted.
 func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, bool) {
 	rd.cacheMu.RLock()
 	entry, ok := rd.cache[query]
@@ -410,6 +464,8 @@ func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, 
 		return nil, nil, false
 	}
 	if now.After(entry.expiresAt) {
+		// upgrade to write lock and re-check before deleting to avoid racing with
+		// a concurrent lookup that may have already stored a fresh entry
 		rd.cacheMu.Lock()
 		if current, exists := rd.cache[query]; exists && now.After(current.expiresAt) {
 			delete(rd.cache, query)
@@ -421,6 +477,8 @@ func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, 
 	return append([]string(nil), entry.txt...), entry.err, true
 }
 
+// storeLookup writes entry into the cache under the write lock, evicting one existing
+// entry first if the cache is at capacity and query is not already present.
 func (rd *RedirDns) storeLookup(query string, entry dnsCacheEntry) {
 	rd.cacheMu.Lock()
 	defer rd.cacheMu.Unlock()
@@ -453,6 +511,11 @@ func (rd *RedirDns) evictOneCacheEntry(now time.Time) {
 	}
 }
 
+// normalizeRequestHost extracts and validates the hostname from an HTTP Host header value.
+// It strips an optional port, IPv6 brackets, surrounding whitespace, and a trailing dot
+// (absolute-form FQDN), then rejects empty values, IP addresses (which have no DNS TXT
+// record to look up), and hostnames that do not conform to DNS label syntax.
+// Returns the hostname lowercased and without a trailing dot.
 func normalizeRequestHost(host string) (string, error) {
 	reqHost, _, err := net.SplitHostPort(host)
 	if err != nil {
@@ -473,6 +536,10 @@ func normalizeRequestHost(host string) (string, error) {
 	return strings.ToLower(reqHost), nil
 }
 
+// isValidDNSHost reports whether host is a syntactically valid DNS hostname per
+// RFC 1123: total length ≤ 253 characters, each dot-separated label 1–63 characters,
+// composed only of ASCII letters, digits, and hyphens, and not starting or ending
+// with a hyphen.
 func isValidDNSHost(host string) bool {
 	if len(host) > 253 {
 		return false
@@ -517,6 +584,9 @@ func containsNonPrintableASCII(s string) bool {
 	return false
 }
 
+// isValidAbsoluteURL reports whether location is a valid absolute HTTP or HTTPS URL
+// suitable for use as a redirect target. It rejects non-HTTP(S) schemes, URLs that
+// contain a userinfo (credentials) component, and URLs without a host.
 func isValidAbsoluteURL(location string) bool {
 	parsedUrl, err := url.Parse(location)
 	if err != nil {
@@ -535,6 +605,9 @@ func isValidAbsoluteURL(location string) bool {
 	return parsedUrl.Host != ""
 }
 
+// classifyLookupError returns a short, log-safe string describing the category of a
+// DNS lookup error. Used to populate the "reason" field in debug log messages without
+// including raw error text that could contain resolver-supplied data.
 func classifyLookupError(err error) string {
 	if err == nil {
 		return "none"
