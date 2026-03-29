@@ -366,8 +366,8 @@ func TestServeHTTPInvalidHostWithDefaultTargetRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServeHTTP returned error: %v", err)
 	}
-	if rr.Code != rd.StatusCode {
-		t.Fatalf("status code = %d, want %d", rr.Code, rd.StatusCode)
+	if rr.Code != rd.statusCode {
+		t.Fatalf("status code = %d, want %d", rr.Code, rd.statusCode)
 	}
 	if got := rr.Header().Get("Location"); got != rd.DefaultTarget {
 		t.Fatalf("Location = %q, want %q", got, rd.DefaultTarget)
@@ -393,8 +393,8 @@ func TestServeHTTPLookupTimeoutFallsBackToDefaultTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServeHTTP returned error: %v", err)
 	}
-	if rr.Code != rd.StatusCode {
-		t.Fatalf("status code = %d, want %d", rr.Code, rd.StatusCode)
+	if rr.Code != rd.statusCode {
+		t.Fatalf("status code = %d, want %d", rr.Code, rd.statusCode)
 	}
 	if got := rr.Header().Get("Location"); got != rd.DefaultTarget {
 		t.Fatalf("Location = %q, want %q", got, rd.DefaultTarget)
@@ -553,35 +553,35 @@ func TestValidateRejectsNonPositiveLookupTimeoutOrCacheTTL(t *testing.T) {
 
 	rd := New()
 	rd.logger = zap.NewNop()
-	rd.LookupTimeout = 0
+	rd.LookupTimeout = "0"
 	if err := rd.Validate(); err == nil {
 		t.Fatalf("expected validate error for zero lookup timeout")
 	}
 
 	rd = New()
 	rd.logger = zap.NewNop()
-	rd.LookupTimeout = caddy.Duration(31 * time.Second)
+	rd.LookupTimeout = "31s"
 	if err := rd.Validate(); err == nil {
 		t.Fatalf("expected validate error for lookup_timeout exceeding maximum")
 	}
 
 	rd = New()
 	rd.logger = zap.NewNop()
-	rd.CacheTTL = -1
+	rd.CacheTTL = "-1ns"
 	if err := rd.Validate(); err == nil {
 		t.Fatalf("expected validate error for negative cache ttl")
 	}
 
 	rd = New()
 	rd.logger = zap.NewNop()
-	rd.RateWindow = 0
+	rd.RateWindow = "0"
 	if err := rd.Validate(); err == nil {
 		t.Fatalf("expected validate error for zero rate window")
 	}
 
 	rd = New()
 	rd.logger = zap.NewNop()
-	rd.MaxUniqueHostsPerClient = 0
+	rd.MaxUniqueHostsPerClient = "0"
 	if err := rd.Validate(); err == nil {
 		t.Fatalf("expected validate error for non-positive max_unique_hosts_per_client")
 	}

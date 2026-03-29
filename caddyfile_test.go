@@ -2,7 +2,6 @@ package redirdns
 
 import (
 	"testing"
-	"time"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
@@ -24,17 +23,17 @@ redir_dns {
 	if err := rd.UnmarshalCaddyfile(d); err != nil {
 		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
 	}
-	if time.Duration(rd.LookupTimeout) != 750*time.Millisecond {
-		t.Fatalf("lookup timeout = %v, want %v", time.Duration(rd.LookupTimeout), 750*time.Millisecond)
+	if rd.LookupTimeout != "750ms" {
+		t.Fatalf("lookup timeout = %q, want %q", rd.LookupTimeout, "750ms")
 	}
-	if time.Duration(rd.CacheTTL) != 45*time.Second {
-		t.Fatalf("cache ttl = %v, want %v", time.Duration(rd.CacheTTL), 45*time.Second)
+	if rd.CacheTTL != "45s" {
+		t.Fatalf("cache ttl = %q, want %q", rd.CacheTTL, "45s")
 	}
-	if time.Duration(rd.RateWindow) != 90*time.Second {
-		t.Fatalf("rate window = %v, want %v", time.Duration(rd.RateWindow), 90*time.Second)
+	if rd.RateWindow != "90s" {
+		t.Fatalf("rate window = %q, want %q", rd.RateWindow, "90s")
 	}
-	if rd.MaxUniqueHostsPerClient != 77 {
-		t.Fatalf("max unique hosts per client = %d, want %d", rd.MaxUniqueHostsPerClient, 77)
+	if rd.MaxUniqueHostsPerClient != "77" {
+		t.Fatalf("max unique hosts per client = %q, want %q", rd.MaxUniqueHostsPerClient, "77")
 	}
 	if len(rd.TrustedProxies) != 2 {
 		t.Fatalf("trusted proxies length = %d, want %d", len(rd.TrustedProxies), 2)

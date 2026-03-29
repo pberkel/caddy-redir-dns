@@ -2,6 +2,7 @@ package redirdns
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -70,6 +71,34 @@ var (
 	txtPrefixRegex = regexp.MustCompile(`^[_a-zA-Z0-9]([_a-zA-Z0-9-]{0,61}[_a-zA-Z0-9])?$`)
 )
 
+// StringOrInt is a config field type that accepts both a bare JSON number (e.g. 302)
+// and a quoted string (e.g. "302" or "{env.STATUS_CODE}"). Values are stored as a
+// string so that Caddy environment-variable placeholders can be expanded in Provision
+// before the integer is parsed. JSON serialisation round-trips numeric strings back
+// to bare numbers for backward compatibility.
+type StringOrInt string
+
+func (s *StringOrInt) UnmarshalJSON(b []byte) error {
+	var n int
+	if err := json.Unmarshal(b, &n); err == nil {
+		*s = StringOrInt(strconv.Itoa(n))
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(b, &str); err != nil {
+		return fmt.Errorf("cannot unmarshal %s into StringOrInt", b)
+	}
+	*s = StringOrInt(str)
+	return nil
+}
+
+func (s StringOrInt) MarshalJSON() ([]byte, error) {
+	if _, err := strconv.Atoi(string(s)); err == nil {
+		return []byte(string(s)), nil
+	}
+	return json.Marshal(string(s))
+}
+
 type dnsCacheEntry struct {
 	txt       []string
 	err       error
@@ -83,24 +112,32 @@ type RedirDns struct {
 	// DNS TXT record prefix where the redirect information is stored. Default: "_redirdns"
 	DnsPrefix string `json:"dns_prefix,omitempty"`
 	// The HTTP status code returned by the redirect response. Default: 302
-	StatusCode int `json:"status_code,omitempty"`
+	// Accepts a bare integer (302) or a quoted string ("{env.STATUS_CODE}").
+	StatusCode StringOrInt `json:"status_code,omitempty"`
 	// Maximum time to wait for DNS TXT lookups before falling back. Default: 500ms
-	LookupTimeout caddy.Duration `json:"lookup_timeout,omitempty"`
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.LOOKUP_TIMEOUT}").
+	LookupTimeout string `json:"lookup_timeout,omitempty"`
 	// TTL for in-memory DNS TXT lookup cache entries. Default: 30s
-	CacheTTL caddy.Duration `json:"cache_ttl,omitempty"`
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.CACHE_TTL}").
+	CacheTTL string `json:"cache_ttl,omitempty"`
 	// Sliding window used to track per-client unique hosts. Default: 1m
-	RateWindow caddy.Duration `json:"rate_window,omitempty"`
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.RATE_WINDOW}").
+	RateWindow string `json:"rate_window,omitempty"`
 	// Maximum unique hosts allowed per client within rate_window. Default: 50
-	MaxUniqueHostsPerClient int `json:"max_unique_hosts_per_client,omitempty"`
+	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_HOSTS}").
+	MaxUniqueHostsPerClient StringOrInt `json:"max_unique_hosts_per_client,omitempty"`
 	// Maximum number of DNS TXT records held in the in-memory cache. Default: 10000
-	MaxCacheSize int `json:"max_cache_size,omitempty"`
+	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CACHE_SIZE}").
+	MaxCacheSize StringOrInt `json:"max_cache_size,omitempty"`
 	// Maximum number of per-client rate-limit entries tracked in memory. Default: 100000
-	MaxClients int `json:"max_clients,omitempty"`
+	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CLIENTS}").
+	MaxClients StringOrInt `json:"max_clients,omitempty"`
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 	// The HTML response document served when the redirect cannot be completed
 	responseTpl  *template.Template
 	logger       *zap.Logger
+	statusCode   int
 	replacer     *strings.Replacer
 	resolver     *net.Resolver
 	lookupTTL    time.Duration
@@ -121,16 +158,16 @@ type RedirDns struct {
 func New() *RedirDns {
 	// create and return new RedirDns struct with default values
 	rd := RedirDns{
-		DefaultTarget:           "",
 		DnsPrefix:               defaultDnsPrefix,
-		StatusCode:              defaultStatusCode,
-		LookupTimeout:           caddy.Duration(defaultDnsLookupTimeout),
-		CacheTTL:                caddy.Duration(defaultDnsCacheTTL),
-		RateWindow:              caddy.Duration(defaultRateLimitWindow),
-		MaxUniqueHostsPerClient: defaultMaxUniqueHostsPerClient,
-		MaxCacheSize:            defaultMaxCacheSize,
-		MaxClients:              defaultMaxClients,
+		StatusCode:              StringOrInt(strconv.Itoa(defaultStatusCode)),
+		LookupTimeout:           defaultDnsLookupTimeout.String(),
+		CacheTTL:                defaultDnsCacheTTL.String(),
+		RateWindow:              defaultRateLimitWindow.String(),
+		MaxUniqueHostsPerClient: StringOrInt(strconv.Itoa(defaultMaxUniqueHostsPerClient)),
+		MaxCacheSize:            StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
+		MaxClients:              StringOrInt(strconv.Itoa(defaultMaxClients)),
 		resolver:                net.DefaultResolver,
+		statusCode:              defaultStatusCode,
 		lookupTTL:               defaultDnsCacheTTL,
 		lookupMax:               defaultDnsLookupTimeout,
 		cache:                   make(map[string]dnsCacheEntry),
@@ -166,7 +203,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			zap.String("host", r.Host), zap.Error(err))
 		if rd.DefaultTarget != "" {
 			// redirect to default target if supplied
-			return writeRedirectResponse(w, rd.StatusCode, rd.DefaultTarget)
+			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
 			"Redirect Failed", "Unable to process request hostname")
@@ -195,7 +232,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		// DNS lookup returned no / invalid response
 		if rd.DefaultTarget != "" {
 			// redirect to default target if supplied
-			return writeRedirectResponse(w, rd.StatusCode, rd.DefaultTarget)
+			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
 			"Redirect Failed", "Unable to load TXT DNS record")
@@ -219,7 +256,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	// none of the TXT records contained a valid redirect
 	if rd.DefaultTarget != "" {
 		// redirect to default target if supplied
-		return writeRedirectResponse(w, rd.StatusCode, rd.DefaultTarget)
+		return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 	}
 
 	return rd.writeHtmlResponse(w, http.StatusNotFound,
@@ -292,7 +329,7 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 	}
 	// set default return values
 	targetUrl := ""
-	statusCode := rd.StatusCode
+	statusCode := rd.statusCode
 	// split the expanded record on whitespace
 	parts := strings.Fields(replaced)
 	// First part (manditory) should be the target URL

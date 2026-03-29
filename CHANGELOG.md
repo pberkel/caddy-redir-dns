@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.3 — 2026-03-30
+
+### Added
+- All configuration parameters now accept Caddy global placeholders (e.g. `{env.VAR_NAME}`) in addition to their literal values. Placeholders are expanded at provision time using `caddy.NewReplacer()`, so environment variables and other Caddy-provided global values can be used to configure any parameter without rebuilding the binary or changing the Caddyfile.
+
+### Changed
+- JSON schema for `status_code`, `max_unique_hosts_per_client`, `max_cache_size`, and `max_clients` now accepts both a bare integer (`302`) and a quoted string (`"302"` or `"{env.STATUS_CODE}"`). Bare integers continue to round-trip correctly; no changes to existing JSON configs are required.
+- JSON schema for `lookup_timeout`, `cache_ttl`, and `rate_window` is unchanged (these were already quoted duration strings in JSON via `caddy.Duration`). The underlying field type has changed from `caddy.Duration` to `string`; the serialised form is identical.
+- Caddyfile parsing of typed fields (durations and integers) is now deferred from `UnmarshalCaddyfile` to `Provision`. Parse errors for these fields are therefore reported at provision time rather than at Caddyfile parse time. The observable behaviour is the same — both prevent Caddy from starting — but the error message may differ slightly in format.
+
 ## v1.1.2 — 2026-03-29
 
 ### Added

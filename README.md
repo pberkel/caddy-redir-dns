@@ -37,6 +37,19 @@ Several optional parameters are also supported:
 }
 ```
 
+All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/caddyfile/concepts#placeholders) (expanded at startup, not per-request). The most common use is injecting values from environment variables:
+
+```caddyfile
+:80 {
+	redir_dns {
+		default_target "{env.FALLBACK_URL}"
+		status_code    "{env.REDIRECT_STATUS}"
+		lookup_timeout "{env.LOOKUP_TIMEOUT}"
+		trusted_proxies "{env.PROXY_CIDR}"
+	}
+}
+```
+
 * __default_target__ specifies a redirect URL that will be used if the module is unable to determine an appropriate redirect location (i.e. the hostname is an IP address, the TXT record doesn't exit or is invalid).  If this parameter is not set and an error occurs during redirect processing, a simple 404 response will be returned.
 * __dns_prefix__ specifies the prefix used to construct the TXT DNS record name where redirect information for a given host is stored in the format <dns_prefix>.host.domain.  Default value: "_redirdns".
 * __status_code__ specifies the numeric HTTP response code used in the redirect. Allowed values are `301`, `302`, `303`, `307`, and `308`. Default value: `302`.
