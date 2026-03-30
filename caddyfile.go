@@ -13,6 +13,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func init() {
@@ -141,19 +142,21 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	if err != nil {
 		return err
 	}
-	rd.logger.Info("provisioned module",
-		zap.String("default_target", rd.DefaultTarget),
-		zap.String("dns_prefix", rd.DnsPrefix),
-		zap.Int("status_code", rd.statusCode),
-		zap.Duration("lookup_timeout", rd.lookupMax),
-		zap.Duration("cache_ttl", rd.lookupTTL),
-		zap.Int("max_cache_size", rd.maxCacheSize),
-		zap.Int("max_clients", rd.maxClients),
-		zap.Duration("rate_window", rd.rateWindow),
-		zap.Int("max_unique_hosts_per_client", rd.maxHosts),
-		zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
-		zap.Int("nameserver_entries", len(rd.Nameservers)),
-	)
+	if c := rd.logger.Check(zapcore.InfoLevel, "provisioned module"); c != nil {
+		c.Write(
+			zap.String("default_target", rd.DefaultTarget),
+			zap.String("dns_prefix", rd.DnsPrefix),
+			zap.Int("status_code", rd.statusCode),
+			zap.Duration("lookup_timeout", rd.lookupMax),
+			zap.Duration("cache_ttl", rd.lookupTTL),
+			zap.Int("max_cache_size", rd.maxCacheSize),
+			zap.Int("max_clients", rd.maxClients),
+			zap.Duration("rate_window", rd.rateWindow),
+			zap.Int("max_unique_hosts_per_client", rd.maxHosts),
+			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
+			zap.Int("nameserver_entries", len(rd.Nameservers)),
+		)
+	}
 
 	rd.startRateLimiterCleanup(ctx)
 

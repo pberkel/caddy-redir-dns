@@ -19,6 +19,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -147,22 +148,26 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	// extract the host name from the request
 	reqHost, err := normalizeRequestHost(r.Host)
 	if err != nil {
-		rd.logger.Debug("Request cannot be processed for DNS redirect because the Host header is invalid",
-			zap.String("host", r.Host), zap.Error(err))
+		if c := rd.logger.Check(zapcore.DebugLevel, "Request cannot be processed because the Host header is invalid"); c != nil {
+			c.Write(zap.String("host", r.Host), zap.Error(err))
+		}
 		if rd.DefaultTarget != "" {
 			// redirect to default target if supplied
 			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
-			"Redirect Failed", "Unable to process request hostname")
+			"Redirect Failure", "Unable to normalize request: "+err.Error())
 	}
 
 	// check if client should be rate-limited
 	if rd.isClientHostRateLimited(r, reqHost, time.Now()) {
-		rd.logger.Debug("DNS lookup skipped because client exceeded unique host rate limit in active window",
-			zap.String("host", reqHost),
-			zap.Duration("window", rd.rateWindow),
-			zap.Int("max_unique_hosts", rd.maxHosts))
+		if c := rd.logger.Check(zapcore.DebugLevel, "DNS lookup skipped because client exceeded unique host rate limit in active window"); c != nil {
+			c.Write(
+				zap.String("host", reqHost),
+				zap.Duration("window", rd.rateWindow),
+				zap.Int("max_unique_hosts", rd.maxHosts),
+			)
+		}
 		return rd.writeHtmlResponse(w, http.StatusTooManyRequests,
 			"Too Many Requests", "Too many unique hostnames requested in a short period")
 	}
@@ -173,28 +178,34 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 
 	// check if the DNS lookup returned a response
 	if err != nil || len(txtRecord) == 0 {
-		rd.logger.Debug("DNS TXT lookup did not return redirect data; applying fallback behavior",
-			zap.String("host", reqHost),
-			zap.String("query", txtQuery),
-			zap.String("reason", classifyLookupError(err)))
+		if c := rd.logger.Check(zapcore.DebugLevel, "DNS TXT lookup did not return redirect data; applying fallback behavior"); c != nil {
+			c.Write(
+				zap.String("host", reqHost),
+				zap.String("query", txtQuery),
+				zap.String("reason", classifyLookupError(err)),
+			)
+		}
 		// DNS lookup returned no / invalid response
 		if rd.DefaultTarget != "" {
 			// redirect to default target if supplied
 			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
-			"Redirect Failed", "Unable to load TXT DNS record")
+			"Redirect Failure", "Unable to load TXT record: "+err.Error())
 	}
 
 	// iterate over each TXT record in the response
 	for i, txt := range txtRecord {
 		// parse the TXT record to extract redirect location
 		targetUrl, statusCode := rd.parseTxtRecord(reqHost, txt, r)
-		rd.logger.Debug("Evaluated DNS TXT redirect candidate",
-			zap.String("host", reqHost),
-			zap.Int("txt_index", i),
-			zap.Bool("accepted", targetUrl != ""),
-			zap.Int("status_code", statusCode))
+		if c := rd.logger.Check(zapcore.DebugLevel, "Evaluated DNS TXT redirect candidate"); c != nil {
+			c.Write(
+				zap.String("host", reqHost),
+				zap.Int("txt_index", i),
+				zap.Bool("accepted", targetUrl != ""),
+				zap.Int("status_code", statusCode),
+			)
+		}
 		if targetUrl != "" {
 			// output HTTP redirect response
 			return writeRedirectResponse(w, statusCode, targetUrl)
@@ -208,7 +219,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	}
 
 	return rd.writeHtmlResponse(w, http.StatusNotFound,
-		"Redirect Failed", "Unable to determine redirect target")
+		"Redirect Failure", "Unable to determine target")
 }
 
 // writeRedirectResponse writes a redirect response with the given status code and Location header.
@@ -250,7 +261,9 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 	replVal := r.Context().Value(caddy.ReplacerCtxKey)
 	repl, ok := replVal.(*caddy.Replacer)
 	if !ok || repl == nil {
-		rd.logger.Debug("Dynamic placeholder expansion skipped because request replacer context is unavailable")
+		if c := rd.logger.Check(zapcore.DebugLevel, "Dynamic placeholder expansion skipped because request replacer context is unavailable"); c != nil {
+			c.Write()
+		}
 	} else {
 		replaced, _ = repl.ReplaceFunc(replaced, func(key string, val any) (any, error) {
 			// {labels.N} and {http.request.host.labels.N} index hostname labels right-to-left:
@@ -305,7 +318,9 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 		if isValidAbsoluteURL(parts[0]) && !containsNonPrintableASCII(parts[0]) {
 			targetUrl = parts[0]
 		} else {
-			rd.logger.Debug("Rejected DNS TXT redirect candidate because target is not a valid absolute HTTP/HTTPS URL")
+			if c := rd.logger.Check(zapcore.DebugLevel, "Rejected DNS TXT redirect candidate because target is not a valid absolute HTTP/HTTPS URL"); c != nil {
+				c.Write()
+			}
 		}
 	}
 
@@ -321,8 +336,9 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 			if err == nil && isSupportedStatusCode(code) {
 				statusCode = code
 			} else {
-				rd.logger.Debug("Ignored TXT status token because it is not a supported redirect status",
-					zap.String("status_token", parts[1]))
+				if c := rd.logger.Check(zapcore.DebugLevel, "Ignored TXT status token because it is not a supported redirect status"); c != nil {
+					c.Write(zap.String("status_token", parts[1]))
+				}
 			}
 		}
 	}
