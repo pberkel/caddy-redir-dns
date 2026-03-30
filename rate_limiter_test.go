@@ -12,9 +12,9 @@ func TestIsClientHostRateLimitedRespectsMaxClients(t *testing.T) {
 
 	const maxClients = 2
 	rd := newTestRedirDns(t)
-	rd.maxClients = maxClients
-	rd.maxHosts = 100
-	rd.rateWindow = time.Minute
+	rd.maxTrackedClients = maxClients
+	rd.maxUniqueHostsPerClient = 100
+	rd.uniqueHostWindow = time.Minute
 
 	makeReq := func(ip string) *http.Request {
 		req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
@@ -27,9 +27,9 @@ func TestIsClientHostRateLimitedRespectsMaxClients(t *testing.T) {
 	rd.isClientHostRateLimited(makeReq("203.0.113.2"), "b.example.com", now)
 	rd.isClientHostRateLimited(makeReq("203.0.113.3"), "c.example.com", now)
 
-	rd.rlMu.Lock()
-	clientsLen := len(rd.clients)
-	rd.rlMu.Unlock()
+	rd.clientsMu.Lock()
+	clientsLen := len(rd.clientTrackers)
+	rd.clientsMu.Unlock()
 
 	if clientsLen > maxClients {
 		t.Fatalf("clients map size = %d, want <= %d", clientsLen, maxClients)

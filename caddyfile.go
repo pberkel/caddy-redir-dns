@@ -34,7 +34,7 @@ func New() *RedirDns {
 		StatusCode:              StringOrInt(strconv.Itoa(defaultStatusCode)),
 		LookupTimeout:           defaultDnsLookupTimeout.String(),
 		CacheTTL:                defaultDnsCacheTTL.String(),
-		RateWindow:              defaultRateLimitWindow.String(),
+		UniqueHostWindow:        defaultRateLimitWindow.String(),
 		MaxUniqueHostsPerClient: StringOrInt(strconv.Itoa(defaultMaxUniqueHostsPerClient)),
 		MaxCacheSize:            StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
 		MaxClients:              StringOrInt(strconv.Itoa(defaultMaxClients)),
@@ -44,10 +44,10 @@ func New() *RedirDns {
 		lookupMax:               defaultDnsLookupTimeout,
 		cache:                   make(map[string]dnsCacheEntry),
 		maxCacheSize:            defaultMaxCacheSize,
-		clients:                 make(map[string]*clientHostTracker),
-		maxClients:              defaultMaxClients,
-		rateWindow:              defaultRateLimitWindow,
-		maxHosts:                defaultMaxUniqueHostsPerClient,
+		clientTrackers:          make(map[string]*clientHostTracker),
+		maxTrackedClients:       defaultMaxClients,
+		uniqueHostWindow:        defaultRateLimitWindow,
+		maxUniqueHostsPerClient: defaultMaxUniqueHostsPerClient,
 	}
 	return &rd
 }
@@ -90,7 +90,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	rd.DnsPrefix = repl.ReplaceAll(rd.DnsPrefix, "")
 	rd.LookupTimeout = repl.ReplaceAll(rd.LookupTimeout, "")
 	rd.CacheTTL = repl.ReplaceAll(rd.CacheTTL, "")
-	rd.RateWindow = repl.ReplaceAll(rd.RateWindow, "")
+	rd.UniqueHostWindow = repl.ReplaceAll(rd.UniqueHostWindow, "")
 	rd.StatusCode = StringOrInt(repl.ReplaceAll(string(rd.StatusCode), ""))
 	rd.MaxUniqueHostsPerClient = StringOrInt(repl.ReplaceAll(string(rd.MaxUniqueHostsPerClient), ""))
 	rd.MaxCacheSize = StringOrInt(repl.ReplaceAll(string(rd.MaxCacheSize), ""))
@@ -114,21 +114,21 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	if rd.lookupTTL, err = time.ParseDuration(rd.CacheTTL); err != nil {
 		return fmt.Errorf("invalid cache_ttl %q: %v", rd.CacheTTL, err)
 	}
-	if rd.rateWindow, err = time.ParseDuration(rd.RateWindow); err != nil {
-		return fmt.Errorf("invalid rate_window %q: %v", rd.RateWindow, err)
+	if rd.uniqueHostWindow, err = time.ParseDuration(rd.UniqueHostWindow); err != nil {
+		return fmt.Errorf("invalid unique_host_window %q: %v", rd.UniqueHostWindow, err)
 	}
 
 	// parse int fields
 	if rd.statusCode, err = strconv.Atoi(string(rd.StatusCode)); err != nil {
 		return fmt.Errorf("invalid status_code %q: %v", rd.StatusCode, err)
 	}
-	if rd.maxHosts, err = strconv.Atoi(string(rd.MaxUniqueHostsPerClient)); err != nil {
+	if rd.maxUniqueHostsPerClient, err = strconv.Atoi(string(rd.MaxUniqueHostsPerClient)); err != nil {
 		return fmt.Errorf("invalid max_unique_hosts_per_client %q: %v", rd.MaxUniqueHostsPerClient, err)
 	}
 	if rd.maxCacheSize, err = strconv.Atoi(string(rd.MaxCacheSize)); err != nil {
 		return fmt.Errorf("invalid max_cache_size %q: %v", rd.MaxCacheSize, err)
 	}
-	if rd.maxClients, err = strconv.Atoi(string(rd.MaxClients)); err != nil {
+	if rd.maxTrackedClients, err = strconv.Atoi(string(rd.MaxClients)); err != nil {
 		return fmt.Errorf("invalid max_clients %q: %v", rd.MaxClients, err)
 	}
 
@@ -175,12 +175,12 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Duration("lookup_timeout", rd.lookupMax),
 			zap.Duration("cache_ttl", rd.lookupTTL),
 			zap.Int("max_cache_size", rd.maxCacheSize),
-			zap.Int("max_clients", rd.maxClients),
-			zap.Duration("rate_window", rd.rateWindow),
-			zap.Int("max_unique_hosts_per_client", rd.maxHosts),
+			zap.Int("max_clients", rd.maxTrackedClients),
+			zap.Duration("unique_host_window", rd.uniqueHostWindow),
+			zap.Int("max_unique_hosts_per_client", rd.maxUniqueHostsPerClient),
 			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
 			zap.Int("nameserver_entries", len(rd.Nameservers)),
-		zap.String("response_template", rd.ResponseTemplate),
+			zap.String("response_template", rd.ResponseTemplate),
 		)
 	}
 
@@ -224,12 +224,12 @@ func (rd *RedirDns) Validate() error {
 	if cacheTTL <= 0 {
 		return fmt.Errorf("cache_ttl must be greater than 0")
 	}
-	rateWindow, err := time.ParseDuration(rd.RateWindow)
+	rateWindow, err := time.ParseDuration(rd.UniqueHostWindow)
 	if err != nil {
-		return fmt.Errorf("invalid rate_window %q: %v", rd.RateWindow, err)
+		return fmt.Errorf("invalid unique_host_window %q: %v", rd.UniqueHostWindow, err)
 	}
 	if rateWindow <= 0 {
-		return fmt.Errorf("rate_window must be greater than 0")
+		return fmt.Errorf("unique_host_window must be greater than 0")
 	}
 	maxHosts, err := strconv.Atoi(string(rd.MaxUniqueHostsPerClient))
 	if err != nil || maxHosts <= 0 {
@@ -296,11 +296,11 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.CacheTTL = d.Val()
-			case "rate_window":
+			case "unique_host_window":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.RateWindow = d.Val()
+				rd.UniqueHostWindow = d.Val()
 			case "max_unique_hosts_per_client":
 				if !d.NextArg() {
 					return d.ArgErr()

@@ -316,8 +316,8 @@ func TestServeHTTPHostCardinalityRateLimitSkipsDNSLookup(t *testing.T) {
 
 	rd := newTestRedirDns(t)
 	rd.DefaultTarget = "https://default.example/"
-	rd.maxHosts = 2
-	rd.rateWindow = time.Minute
+	rd.maxUniqueHostsPerClient = 2
+	rd.uniqueHostWindow = time.Minute
 
 	var calls atomic.Int64
 	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
@@ -359,8 +359,8 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	t.Parallel()
 
 	rd := newTestRedirDns(t)
-	rd.maxHosts = 1
-	rd.rateWindow = 30 * time.Millisecond
+	rd.maxUniqueHostsPerClient = 1
+	rd.uniqueHostWindow = 30 * time.Millisecond
 
 	var calls atomic.Int64
 	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
@@ -431,7 +431,7 @@ func TestValidateRejectsNonPositiveLookupTimeoutOrCacheTTL(t *testing.T) {
 
 	rd = New()
 	rd.logger = zap.NewNop()
-	rd.RateWindow = "0"
+	rd.UniqueHostWindow = "0"
 	if err := rd.Validate(); err == nil {
 		t.Fatalf("expected validate error for zero rate window")
 	}

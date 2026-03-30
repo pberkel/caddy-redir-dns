@@ -31,7 +31,7 @@ const (
 // clientHostTracker records the set of unique hostnames a single client has requested
 // within the current rate-limit window, together with the time each was last seen.
 // lastSeen is updated on every request and is used by the background cleanup goroutine
-// to identify trackers that have been idle for longer than rateWindow.
+// to identify trackers that have been idle for longer than uniqueHostWindow.
 type clientHostTracker struct {
 	hosts    map[string]time.Time // hostname → time last requested
 	lastSeen time.Time
@@ -42,14 +42,14 @@ type clientHostTracker struct {
 // context is cancelled (i.e. when Caddy replaces or stops this module instance).
 func (rd *RedirDns) startRateLimiterCleanup(ctx caddy.Context) {
 	go func() {
-		ticker := time.NewTicker(rd.rateWindow)
+		ticker := time.NewTicker(rd.uniqueHostWindow)
 		defer ticker.Stop()
 		for {
 			select {
 			case now := <-ticker.C:
-				rd.rlMu.Lock()
+				rd.clientsMu.Lock()
 				rd.cleanupRateLimitState(now)
-				rd.rlMu.Unlock()
+				rd.clientsMu.Unlock()
 			case <-ctx.Done():
 				return
 			}
@@ -61,16 +61,16 @@ func (rd *RedirDns) startRateLimiterCleanup(ctx caddy.Context) {
 // unique-host cardinality limit for the current sliding window. It returns true
 // (rate-limited) in the following cases:
 //   - the client's remote address cannot be parsed (fail-closed)
-//   - the client has already requested maxHosts distinct hostnames within rateWindow
+//   - the client has already requested maxUniqueHostsPerClient distinct hostnames within uniqueHostWindow
 //
 // A hostname the client has requested before is always allowed through and its
 // timestamp is refreshed, so the limit applies only to the number of distinct hosts
 // within the window, not to repeat visits to the same host.
 //
-// Rate limiting is skipped entirely (returns false) when maxHosts or rateWindow is
+// Rate limiting is skipped entirely (returns false) when maxUniqueHostsPerClient or uniqueHostWindow is
 // not positive, allowing the feature to be effectively disabled.
 func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now time.Time) bool {
-	if rd.maxHosts <= 0 || rd.rateWindow <= 0 {
+	if rd.maxUniqueHostsPerClient <= 0 || rd.uniqueHostWindow <= 0 {
 		return false
 	}
 	clientID := rd.clientIDFromRequest(r)
@@ -78,26 +78,26 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 		return true // fail-closed: unparseable remote address
 	}
 
-	rd.rlMu.Lock()
-	defer rd.rlMu.Unlock()
+	rd.clientsMu.Lock()
+	defer rd.clientsMu.Unlock()
 
-	tracker, ok := rd.clients[clientID]
+	tracker, ok := rd.clientTrackers[clientID]
 	if !ok {
 		// evict one entry before inserting a new one to keep the map within maxClients
-		if len(rd.clients) >= rd.maxClients {
+		if len(rd.clientTrackers) >= rd.maxTrackedClients {
 			rd.evictOneClient()
 		}
 		tracker = &clientHostTracker{
 			hosts: make(map[string]time.Time),
 		}
-		rd.clients[clientID] = tracker
+		rd.clientTrackers[clientID] = tracker
 	}
 
 	// sweep expired host entries for this client on the request path; the background
 	// goroutine handles full cleanup periodically, but this keeps per-client state
 	// accurate without waiting for the next tick
 	for h, seenAt := range tracker.hosts {
-		if now.Sub(seenAt) > rd.rateWindow {
+		if now.Sub(seenAt) > rd.uniqueHostWindow {
 			delete(tracker.hosts, h)
 		}
 	}
@@ -108,7 +108,7 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 		tracker.hosts[host] = now
 		return false
 	}
-	if len(tracker.hosts) >= rd.maxHosts {
+	if len(tracker.hosts) >= rd.maxUniqueHostsPerClient {
 		return true
 	}
 	tracker.hosts[host] = now
@@ -117,28 +117,28 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 }
 
 // evictOneClient removes an arbitrary client to make room when the map is at
-// capacity. It must be called with rlMu held. The background goroutine already
+// capacity. It must be called with clientsMu held. The background goroutine already
 // prunes genuinely idle clients on every tick, so remaining entries at capacity
 // are all recently active; any eviction strategy is equivalent in practice.
 // A single map iteration is O(1) amortised and avoids an O(n) scan.
 func (rd *RedirDns) evictOneClient() {
-	for id := range rd.clients {
-		delete(rd.clients, id)
+	for id := range rd.clientTrackers {
+		delete(rd.clientTrackers, id)
 		return
 	}
 }
 
 // cleanupRateLimitState purges expired host entries and idle client trackers.
-// It must be called with rlMu held.
+// It must be called with clientsMu held.
 func (rd *RedirDns) cleanupRateLimitState(now time.Time) {
-	for clientID, tracker := range rd.clients {
+	for clientID, tracker := range rd.clientTrackers {
 		for host, seenAt := range tracker.hosts {
-			if now.Sub(seenAt) > rd.rateWindow {
+			if now.Sub(seenAt) > rd.uniqueHostWindow {
 				delete(tracker.hosts, host)
 			}
 		}
-		if len(tracker.hosts) == 0 && now.Sub(tracker.lastSeen) > rd.rateWindow {
-			delete(rd.clients, clientID)
+		if len(tracker.hosts) == 0 && now.Sub(tracker.lastSeen) > rd.uniqueHostWindow {
+			delete(rd.clientTrackers, clientID)
 		}
 	}
 }

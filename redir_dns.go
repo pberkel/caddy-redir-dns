@@ -69,37 +69,48 @@ func (s StringOrInt) MarshalJSON() ([]byte, error) {
 
 // RedirDns is a Caddy module implementing HTTP redirects stored in DNS TXT records
 type RedirDns struct {
+	// --- Redirect ---
+
 	// The target URL to redirect when an error occurs. Default: none
 	DefaultTarget string `json:"default_target,omitempty"`
-	// DNS TXT record prefix where the redirect information is stored. Default: "_redirdns"
-	DnsPrefix string `json:"dns_prefix,omitempty"`
 	// The HTTP status code returned by the redirect response. Default: 302
 	// Accepts a bare integer (302) or a quoted string ("{env.STATUS_CODE}").
 	StatusCode StringOrInt `json:"status_code,omitempty"`
+	// DNS TXT record prefix where the redirect information is stored. Default: "_redirdns"
+	DnsPrefix string `json:"dns_prefix,omitempty"`
+
+	// --- DNS lookup ---
+
+	// Custom DNS nameservers (hostnames or IPs, optional port) used for TXT lookups.
+	// When empty the system resolver is used. Multiple entries are tried in order
+	// until one succeeds.
+	Nameservers []string `json:"nameservers,omitempty"`
 	// Maximum time to wait for DNS TXT lookups before falling back. Default: 2s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.LOOKUP_TIMEOUT}").
 	LookupTimeout string `json:"lookup_timeout,omitempty"`
 	// TTL for in-memory DNS TXT lookup cache entries. Default: 30s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.CACHE_TTL}").
 	CacheTTL string `json:"cache_ttl,omitempty"`
-	// Sliding window used to track per-client unique hosts. Default: 1m
-	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.RATE_WINDOW}").
-	RateWindow string `json:"rate_window,omitempty"`
-	// Maximum unique hosts allowed per client within rate_window. Default: 50
-	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_HOSTS}").
-	MaxUniqueHostsPerClient StringOrInt `json:"max_unique_hosts_per_client,omitempty"`
 	// Maximum number of DNS TXT records held in the in-memory cache. Default: 10000
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CACHE_SIZE}").
 	MaxCacheSize StringOrInt `json:"max_cache_size,omitempty"`
+
+	// --- Rate limiting ---
+
+	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// Sliding window used to track per-client unique hosts. Default: 1m
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.UNIQUE_HOST_WINDOW}").
+	UniqueHostWindow string `json:"unique_host_window,omitempty"`
+	// Maximum unique hosts allowed per client within unique_host_window. Default: 50
+	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_UNIQUE_HOSTS_PER_CLIENT}").
+	MaxUniqueHostsPerClient StringOrInt `json:"max_unique_hosts_per_client,omitempty"`
 	// Maximum number of per-client rate-limit entries tracked in memory. Default: 100000
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CLIENTS}").
 	MaxClients StringOrInt `json:"max_clients,omitempty"`
-	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
-	TrustedProxies []string `json:"trusted_proxies,omitempty"`
-	// Custom DNS nameservers (hostnames or IPs, optional port) used for TXT lookups.
-	// When empty the system resolver is used. Multiple entries are tried in order
-	// until one succeeds.
-	Nameservers []string `json:"nameservers,omitempty"`
+
+	// --- Response ---
+
 	// Custom error response template: either a file path or an inline Go html/template
 	// string. At provision time the value is first attempted as a file read; if the file
 	// does not exist the value is used as a literal template string. Any other file error
@@ -133,12 +144,12 @@ type RedirDns struct {
 	lookupGroup  singleflight.Group
 
 	// rate limiting
-	rlMu        sync.Mutex
-	clients     map[string]*clientHostTracker
-	maxClients  int
-	rateWindow  time.Duration
-	maxHosts    int
-	trustedNets []netip.Prefix
+	clientsMu               sync.Mutex
+	clientTrackers          map[string]*clientHostTracker
+	maxTrackedClients       int
+	uniqueHostWindow        time.Duration
+	maxUniqueHostsPerClient int
+	trustedNets             []netip.Prefix
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler. The next handler is never
@@ -203,8 +214,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		if c := rd.logger.Check(zapcore.DebugLevel, "DNS lookup skipped because client exceeded unique host rate limit in active window"); c != nil {
 			c.Write(
 				zap.String("host", reqHost),
-				zap.Duration("window", rd.rateWindow),
-				zap.Int("max_unique_hosts", rd.maxHosts),
+				zap.Duration("window", rd.uniqueHostWindow),
+				zap.Int("max_unique_hosts", rd.maxUniqueHostsPerClient),
 			)
 		}
 		if rd.LogRedirects {
@@ -221,7 +232,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		}
 		return rd.writeHtmlResponse(w, http.StatusTooManyRequests,
 			"Too Many Requests",
-			fmt.Sprintf("This client has exceeded the limit of %d unique hostnames within a %s window.", rd.maxHosts, rd.rateWindow),
+			fmt.Sprintf("This client has exceeded the limit of %d unique hostnames within a %s window.", rd.maxUniqueHostsPerClient, rd.uniqueHostWindow),
 			"The per-client unique-hostname limit exists to prevent DNS amplification attacks. "+
 				"Reduce the rate of requests to distinct hostnames. Requests to previously seen "+
 				"hostnames within the same window are not counted against the limit.")
