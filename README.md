@@ -34,6 +34,7 @@ Several optional parameters are also supported:
 		max_unique_hosts_per_client 50
 		trusted_proxies 10.0.0.0/8 192.168.0.0/16
 		nameserver 1.1.1.1 8.8.8.8
+		response_template /etc/caddy/error.html
 	}
 }
 ```
@@ -60,6 +61,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 * __max_unique_hosts_per_client__ specifies how many unique hostnames a single client may request within `rate_window` before lookups are rate-limited.  Default value: `50`.
 * __trusted_proxies__ specifies CIDRs or IP addresses that are allowed to provide the client IP via the `X-Forwarded-For` or `X-Real-IP` request headers.  `X-Forwarded-For` is checked first (walking right-to-left to find the rightmost non-trusted entry); `X-Real-IP` is used as a fallback (set by nginx and some other proxies).  If the direct peer is not trusted, both headers are ignored and the remote peer address is used instead.
 * __nameserver__ specifies one or more custom DNS nameservers to use for TXT record lookups. Each value is a hostname or IP address with an optional port (e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Multiple addresses may be given space-separated on a single line or across multiple `nameserver` lines; they are tried in order and port `53` is assumed when no port is specified. When this parameter is absent the system resolver is used.
+* __response_template__ overrides the built-in HTML error page with a custom [Go html/template](https://pkg.go.dev/html/template). The value is resolved at provision time as follows: if the value refers to a readable file that path, the file content is used as the template; if no file exists at that path, the value itself is used as an inline template string; any other file error (e.g. permission denied) is treated as a hard failure. The template has access to three fields: `.Title` (short error label), `.Detail` (what went wrong), and `.Resolution` (how to fix it). Accepts a Caddy global placeholder (e.g. `{env.TEMPLATE_PATH}`).
 * When the per-client unique-host limit is exceeded, requests use `default_target` fallback if configured; otherwise a `429 Too Many Requests` response is returned.
 
 ### Usage

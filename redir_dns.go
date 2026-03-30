@@ -127,6 +127,15 @@ type RedirDns struct {
 	// When empty the system resolver is used. Multiple entries are tried in order
 	// until one succeeds.
 	Nameservers []string `json:"nameservers,omitempty"`
+	// Custom error response template: either a file path or an inline Go html/template
+	// string. At provision time the value is first attempted as a file read; if the file
+	// does not exist the value is used as a literal template string. Any other file error
+	// (e.g. permission denied) is treated as a hard failure. The template has access to
+	// .Title, .Detail, and .Resolution fields. When empty the built-in default is used.
+	// Accepts a Caddy global placeholder (e.g. "{env.TEMPLATE_PATH}").
+	// Security note: the template is loaded under the Caddy process's file permissions;
+	// ensure the value is operator-controlled and not derived from untrusted input.
+	ResponseTemplate string `json:"response_template,omitempty"`
 
 	// response rendering
 	responseTpl *template.Template
@@ -216,7 +225,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		}
 		var dnsDetail string
 		if err != nil {
-			dnsDetail = fmt.Sprintf("DNS TXT lookup failed for %s (%s).", txtQuery, classifyLookupError(err))
+			dnsDetail = fmt.Sprintf("Lookup failed for TXT record %s (%s).", txtQuery, classifyLookupError(err))
 		} else {
 			dnsDetail = fmt.Sprintf("No TXT records found at %s.", txtQuery)
 		}

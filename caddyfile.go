@@ -1,9 +1,11 @@
 package redirdns
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -103,6 +105,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		}
 		rd.Nameservers[i] = ns
 	}
+	rd.ResponseTemplate = repl.ReplaceAll(rd.ResponseTemplate, "")
 
 	// parse duration fields
 	if rd.lookupMax, err = time.ParseDuration(rd.LookupTimeout); err != nil {
@@ -137,10 +140,32 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	if err != nil {
 		return err
 	}
-	// compile error response template
-	rd.responseTpl, err = template.New("default").Parse(defaultResponseTemplate)
-	if err != nil {
-		return err
+	// compile error response template — from file, literal string, or built-in default
+	if rd.ResponseTemplate != "" {
+		src, readErr := os.ReadFile(rd.ResponseTemplate)
+		switch {
+		case readErr == nil:
+			// value resolved to a readable file — use its contents
+			rd.responseTpl, err = template.New("custom").Parse(string(src))
+			if err != nil {
+				return fmt.Errorf("response_template: cannot parse file %q: %w", rd.ResponseTemplate, err)
+			}
+		case errors.Is(readErr, os.ErrNotExist):
+			// no file at that path — treat the value itself as an inline template string
+			rd.responseTpl, err = template.New("custom").Parse(rd.ResponseTemplate)
+			if err != nil {
+				return fmt.Errorf("response_template: cannot parse inline template: %w", err)
+			}
+		default:
+			// file exists but could not be read (e.g. permission denied) — hard failure so
+			// that a misconfigured path does not silently fall back to the inline literal
+			return fmt.Errorf("response_template: cannot read file %q: %w", rd.ResponseTemplate, readErr)
+		}
+	} else {
+		rd.responseTpl, err = template.New("default").Parse(defaultResponseTemplate)
+		if err != nil {
+			return err
+		}
 	}
 	if c := rd.logger.Check(zapcore.InfoLevel, "provisioned module"); c != nil {
 		c.Write(
@@ -155,6 +180,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Int("max_unique_hosts_per_client", rd.maxHosts),
 			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
 			zap.Int("nameserver_entries", len(rd.Nameservers)),
+		zap.String("response_template", rd.ResponseTemplate),
 		)
 	}
 
@@ -306,6 +332,11 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				for d.NextArg() {
 					rd.Nameservers = append(rd.Nameservers, d.Val())
 				}
+			case "response_template":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.ResponseTemplate = d.Val()
 			default:
 				return d.Errf("unrecognized configuration option %q", d.Val())
 			}
