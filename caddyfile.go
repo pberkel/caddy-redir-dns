@@ -337,6 +337,8 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.ResponseTemplate = d.Val()
+			case "log_redirects":
+				rd.LogRedirects = true
 			default:
 				return d.Errf("unrecognized configuration option %q", d.Val())
 			}

@@ -28,13 +28,14 @@ Several optional parameters are also supported:
 		default_target "https://www.example.com"
 		dns_prefix "_redirdns"
 		status_code 302
-		lookup_timeout 500ms
+		lookup_timeout 2s
 		cache_ttl 30s
 		rate_window 1m
 		max_unique_hosts_per_client 50
 		trusted_proxies 10.0.0.0/8 192.168.0.0/16
 		nameserver 1.1.1.1 8.8.8.8
 		response_template /etc/caddy/error.html
+		log_redirects
 	}
 }
 ```
@@ -55,13 +56,14 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 * __default_target__ specifies a redirect URL that will be used if the module is unable to determine an appropriate redirect location (i.e. the hostname is an IP address, the TXT record doesn't exit or is invalid).  If this parameter is not set and an error occurs during redirect processing, a simple 404 response will be returned.
 * __dns_prefix__ specifies the prefix used to construct the TXT DNS record name where redirect information for a given host is stored in the format <dns_prefix>.host.domain.  Default value: "_redirdns".
 * __status_code__ specifies the numeric HTTP response code used in the redirect. Allowed values are `301`, `302`, `303`, `307`, and `308`. Default value: `302`.
-* __lookup_timeout__ specifies the maximum time to wait for each DNS TXT lookup before applying fallback behavior.  Duration format must be valid for Go's `time.ParseDuration` (for example `500ms`, `2s`).  Default value: `500ms`.
+* __lookup_timeout__ specifies the maximum time to wait for each DNS TXT lookup before applying fallback behavior.  Duration format must be valid for Go's `time.ParseDuration` (for example `500ms`, `2s`).  Default value: `2s`.
 * __cache_ttl__ specifies the minimum time that successful or failed DNS TXT lookup results are cached in memory. When the TXT record's own DNS TTL exceeds this value the record TTL is used instead, so entries are never served from cache longer than the upstream resolver intended.  Duration format must be valid for Go's `time.ParseDuration` (for example `30s`, `2m`).  Default value: `30s`.
 * __rate_window__ specifies the per-client sliding window used for unique-host tracking.  Duration format must be valid for Go's `time.ParseDuration` (for example `1m`, `30s`).  Default value: `1m`.
 * __max_unique_hosts_per_client__ specifies how many unique hostnames a single client may request within `rate_window` before lookups are rate-limited.  Default value: `50`.
 * __trusted_proxies__ specifies CIDRs or IP addresses that are allowed to provide the client IP via the `X-Forwarded-For` or `X-Real-IP` request headers.  `X-Forwarded-For` is checked first (walking right-to-left to find the rightmost non-trusted entry); `X-Real-IP` is used as a fallback (set by nginx and some other proxies).  If the direct peer is not trusted, both headers are ignored and the remote peer address is used instead.
 * __nameserver__ specifies one or more custom DNS nameservers to use for TXT record lookups. Each value is a hostname or IP address with an optional port (e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Multiple addresses may be given space-separated on a single line or across multiple `nameserver` lines; they are tried in order and port `53` is assumed when no port is specified. When this parameter is absent the system resolver is used.
 * __response_template__ overrides the built-in HTML error page with a custom [Go html/template](https://pkg.go.dev/html/template). The value is resolved at provision time as follows: if the value refers to a readable file that path, the file content is used as the template; if no file exists at that path, the value itself is used as an inline template string; any other file error (e.g. permission denied) is treated as a hard failure. The template has access to three fields: `.Title` (short error label), `.Detail` (what went wrong), and `.Resolution` (how to fix it). Accepts a Caddy global placeholder (e.g. `{env.TEMPLATE_PATH}`).
+* __log_redirects__ enables structured info-level logging of every request handled by the module. When enabled, successful redirects are logged with message `redirect` and error responses with message `redirect error`. Each entry includes the fields `client` (IP address), `method`, `host`, `uri`, `status`, `target` (redirects only), and `reason` (errors only). Logging is disabled by default.
 * When the per-client unique-host limit is exceeded, requests use `default_target` fallback if configured; otherwise a `429 Too Many Requests` response is returned.
 
 ### Usage

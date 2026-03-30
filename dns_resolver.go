@@ -13,7 +13,7 @@ import (
 
 const (
 	// Default DNS lookup timeout per request
-	defaultDnsLookupTimeout = 500 * time.Millisecond
+	defaultDnsLookupTimeout = 2 * time.Second
 
 	// Maximum allowed DNS lookup timeout — guards against goroutine accumulation
 	// since lookups run on context.Background() and are not bounded by request lifetime

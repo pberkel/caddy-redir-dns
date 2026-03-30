@@ -76,7 +76,7 @@ type RedirDns struct {
 	// The HTTP status code returned by the redirect response. Default: 302
 	// Accepts a bare integer (302) or a quoted string ("{env.STATUS_CODE}").
 	StatusCode StringOrInt `json:"status_code,omitempty"`
-	// Maximum time to wait for DNS TXT lookups before falling back. Default: 500ms
+	// Maximum time to wait for DNS TXT lookups before falling back. Default: 2s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.LOOKUP_TIMEOUT}").
 	LookupTimeout string `json:"lookup_timeout,omitempty"`
 	// TTL for in-memory DNS TXT lookup cache entries. Default: 30s
@@ -109,6 +109,10 @@ type RedirDns struct {
 	// Security note: the template is loaded under the Caddy process's file permissions;
 	// ensure the value is operator-controlled and not derived from untrusted input.
 	ResponseTemplate string `json:"response_template,omitempty"`
+	// When true, an info-level structured log entry is emitted for every request:
+	// successful redirects log as "redirect"; error responses log as "redirect error"
+	// with a reason field. Default: false.
+	LogRedirects bool `json:"log_redirects,omitempty"`
 
 	// response rendering
 	responseTpl *template.Template
@@ -143,6 +147,15 @@ type RedirDns struct {
 // not a pass-through middleware.
 func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 
+	// extract client IP for access logging when enabled
+	var clientIP string
+	if rd.LogRedirects {
+		clientIP = rd.clientIDFromRequest(r)
+		if clientIP == "" {
+			clientIP = "-"
+		}
+	}
+
 	// extract the host name from the request
 	reqHost, err := normalizeRequestHost(r.Host)
 	if err != nil {
@@ -151,7 +164,31 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		}
 		if rd.DefaultTarget != "" {
 			// redirect to default target if supplied
+			if rd.LogRedirects {
+				if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
+					c.Write(
+						zap.String("client", clientIP),
+						zap.String("method", r.Method),
+						zap.String("host", r.Host),
+						zap.String("uri", r.RequestURI),
+						zap.String("target", rd.DefaultTarget),
+						zap.Int("status", rd.statusCode),
+					)
+				}
+			}
 			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
+		}
+		if rd.LogRedirects {
+			if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
+				c.Write(
+					zap.String("client", clientIP),
+					zap.String("method", r.Method),
+					zap.String("host", r.Host),
+					zap.String("uri", r.RequestURI),
+					zap.Int("status", http.StatusNotFound),
+					zap.String("reason", "invalid_host"),
+				)
+			}
 		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
 			"Redirect Failure",
@@ -169,6 +206,18 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				zap.Duration("window", rd.rateWindow),
 				zap.Int("max_unique_hosts", rd.maxHosts),
 			)
+		}
+		if rd.LogRedirects {
+			if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
+				c.Write(
+					zap.String("client", clientIP),
+					zap.String("method", r.Method),
+					zap.String("host", reqHost),
+					zap.String("uri", r.RequestURI),
+					zap.Int("status", http.StatusTooManyRequests),
+					zap.String("reason", "rate_limited"),
+				)
+			}
 		}
 		return rd.writeHtmlResponse(w, http.StatusTooManyRequests,
 			"Too Many Requests",
@@ -194,6 +243,18 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		// DNS lookup returned no / invalid response
 		if rd.DefaultTarget != "" {
 			// redirect to default target if supplied
+			if rd.LogRedirects {
+				if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
+					c.Write(
+						zap.String("client", clientIP),
+						zap.String("method", r.Method),
+						zap.String("host", reqHost),
+						zap.String("uri", r.RequestURI),
+						zap.String("target", rd.DefaultTarget),
+						zap.Int("status", rd.statusCode),
+					)
+				}
+			}
 			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 		}
 		var dnsDetail string
@@ -201,6 +262,18 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			dnsDetail = fmt.Sprintf("Lookup failed for TXT record %s (%s).", txtQuery, classifyLookupError(err))
 		} else {
 			dnsDetail = fmt.Sprintf("No TXT records found at %s.", txtQuery)
+		}
+		if rd.LogRedirects {
+			if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
+				c.Write(
+					zap.String("client", clientIP),
+					zap.String("method", r.Method),
+					zap.String("host", reqHost),
+					zap.String("uri", r.RequestURI),
+					zap.Int("status", http.StatusNotFound),
+					zap.String("reason", "dns_lookup_failed"),
+				)
+			}
 		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
 			"Redirect Failure",
@@ -224,6 +297,18 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		}
 		if targetUrl != "" {
 			// output HTTP redirect response
+			if rd.LogRedirects {
+				if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
+					c.Write(
+						zap.String("client", clientIP),
+						zap.String("method", r.Method),
+						zap.String("host", reqHost),
+						zap.String("uri", r.RequestURI),
+						zap.String("target", targetUrl),
+						zap.Int("status", statusCode),
+					)
+				}
+			}
 			return writeRedirectResponse(w, statusCode, targetUrl)
 		}
 	}
@@ -231,9 +316,33 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	// none of the TXT records contained a valid redirect
 	if rd.DefaultTarget != "" {
 		// redirect to default target if supplied
+		if rd.LogRedirects {
+			if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
+				c.Write(
+					zap.String("client", clientIP),
+					zap.String("method", r.Method),
+					zap.String("host", reqHost),
+					zap.String("uri", r.RequestURI),
+					zap.String("target", rd.DefaultTarget),
+					zap.Int("status", rd.statusCode),
+				)
+			}
+		}
 		return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 	}
 
+	if rd.LogRedirects {
+		if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
+			c.Write(
+				zap.String("client", clientIP),
+				zap.String("method", r.Method),
+				zap.String("host", reqHost),
+				zap.String("uri", r.RequestURI),
+				zap.Int("status", http.StatusNotFound),
+				zap.String("reason", "no_valid_txt_record"),
+			)
+		}
+	}
 	return rd.writeHtmlResponse(w, http.StatusNotFound,
 		"Redirect Failure",
 		fmt.Sprintf("TXT records were found at %s but none contained a valid redirect target URL.", txtQuery),
