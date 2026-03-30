@@ -37,10 +37,26 @@ const (
   <meta charset="UTF-8">
   <title>{{.Title}}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 8vh auto; padding: 0 1.5rem; color: #1a1a1a; }
+    h1 { font-size: 1.6rem; margin: 0 0 1.5rem; }
+    section { margin: 1rem 0; }
+    h2 { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #666; margin: 0 0 0.4rem; }
+    .detail { font-family: ui-monospace, monospace; font-size: 0.9rem; background: #f5f5f5; border-left: 3px solid #c00; padding: 0.6rem 0.9rem; border-radius: 0 4px 4px 0; }
+    .resolution { font-size: 0.95rem; line-height: 1.6; color: #333; margin: 0; }
+  </style>
 </head>
-<body style="font-family:sans-serif;text-align:center;padding-top:10vh;">
+<body>
   <h1>{{.Title}}</h1>
-  <p>{{.Msg}}</p>
+  <section>
+    <h2>What happened</h2>
+    <div class="detail">{{.Detail}}</div>
+  </section>
+  <section>
+    <h2>How to resolve</h2>
+    <p class="resolution">{{.Resolution}}</p>
+  </section>
 </body>
 </html>`
 )
@@ -156,7 +172,11 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
-			"Redirect Failure", "Unable to normalize request: "+err.Error())
+			"Redirect Failure",
+			err.Error(),
+			"DNS-based redirects require a valid hostname. IP addresses do not have TXT records "+
+				"and cannot be used as redirect targets. Ensure the request Host header contains a "+
+				"properly formed domain name (e.g. www.example.com).")
 	}
 
 	// check if client should be rate-limited
@@ -169,7 +189,11 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			)
 		}
 		return rd.writeHtmlResponse(w, http.StatusTooManyRequests,
-			"Too Many Requests", "Too many unique hostnames requested in a short period")
+			"Too Many Requests",
+			fmt.Sprintf("This client has exceeded the limit of %d unique hostnames within a %s window.", rd.maxHosts, rd.rateWindow),
+			"The per-client unique-hostname limit exists to prevent DNS amplification attacks. "+
+				"Reduce the rate of requests to distinct hostnames. Requests to previously seen "+
+				"hostnames within the same window are not counted against the limit.")
 	}
 
 	// create DNS TXT query and perform lookup
@@ -190,8 +214,18 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			// redirect to default target if supplied
 			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 		}
+		var dnsDetail string
+		if err != nil {
+			dnsDetail = fmt.Sprintf("DNS TXT lookup failed for %s (%s).", txtQuery, classifyLookupError(err))
+		} else {
+			dnsDetail = fmt.Sprintf("No TXT records found at %s.", txtQuery)
+		}
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
-			"Redirect Failure", "Unable to load TXT record: "+err.Error())
+			"Redirect Failure",
+			dnsDetail,
+			fmt.Sprintf("Create a TXT DNS record at %s containing a valid absolute HTTP or HTTPS redirect URL. "+
+				"If the record already exists, verify that the configured nameserver is reachable and that "+
+				"the lookup_timeout setting is sufficient.", txtQuery))
 	}
 
 	// iterate over each TXT record in the response
@@ -219,7 +253,11 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	}
 
 	return rd.writeHtmlResponse(w, http.StatusNotFound,
-		"Redirect Failure", "Unable to determine target")
+		"Redirect Failure",
+		fmt.Sprintf("TXT records were found at %s but none contained a valid redirect target URL.", txtQuery),
+		"Each TXT record value must be a valid absolute HTTP or HTTPS URL containing only printable ASCII "+
+			"characters. A redirect status code (301, 302, 303, 307, or 308) may optionally follow the URL "+
+			"separated by a space. URLs must not include credentials (user:pass@host).")
 }
 
 // writeRedirectResponse writes a redirect response with the given status code and Location header.
@@ -230,17 +268,25 @@ func writeRedirectResponse(w http.ResponseWriter, statusCode int, location strin
 	return nil
 }
 
-// writeHtmlResponse renders the HTML error page template with the given status code, title, and message.
-func (rd *RedirDns) writeHtmlResponse(w http.ResponseWriter, statusCode int, title, msg string) error {
+// htmlResponseData holds the fields passed to the error response template.
+type htmlResponseData struct {
+	Title      string
+	Detail     string
+	Resolution string
+}
+
+// writeHtmlResponse renders the HTML error page template with the given status code, title,
+// detail (what went wrong), and resolution (how the operator or user can fix it).
+func (rd *RedirDns) writeHtmlResponse(w http.ResponseWriter, statusCode int, title, detail, resolution string) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(statusCode)
-	data := map[string]string{
-		"Title": title,
-		"Msg":   msg,
-	}
 
-	return rd.responseTpl.Execute(w, data)
+	return rd.responseTpl.Execute(w, htmlResponseData{
+		Title:      title,
+		Detail:     detail,
+		Resolution: resolution,
+	})
 }
 
 // parseTxtRecord parses a single DNS TXT record value into a redirect target URL and

@@ -11,6 +11,8 @@
 - `X-Forwarded-For` header processing now caps input to 1024 bytes (retaining the rightmost portion) to bound per-request CPU cost under adversarial header values.
 - `evictOneCacheEntry` merged from two sequential map iterations into one, halving the work when no expired entry is present.
 - Cache miss path in `lookupTXT` reduced from two defensive slice copies to one; the stored cache entry now holds the slice returned directly by the lookup function, and callers receive a copy only at read time.
+- All debug log calls converted to the zap checked-entry pattern (`logger.Check`) so field allocations are skipped entirely when debug logging is disabled.
+- Error responses now include a structured "What happened" detail and "How to resolve" guidance section. Each failure case (invalid host, rate-limited, DNS lookup failure, no valid redirect target) carries a specific explanation and actionable resolution message tailored to that error. The HTML template has been restyled accordingly.
 
 ## v1.1.3 — 2026-03-30
 
