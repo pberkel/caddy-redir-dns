@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## v1.2.0 — 2026-03-31
 
 ### Added
 - `nameserver` configuration parameter accepts one or more custom DNS nameserver addresses (hostname or IP, with optional port). When configured, a `miekg/dns` client is used and the supplied servers are queried in order; the first successful response is returned. NXDOMAIN is treated as terminal and short-circuits any remaining servers. Multiple addresses may be given space-separated on a single line or across multiple `nameserver` lines. Addresses without an explicit port default to `:53`. When `nameserver` is absent the system resolver is used, as before.
 - DNS TXT record TTL is now honoured: when the TTL returned by the upstream resolver exceeds the configured `cache_ttl`, the larger value is used as the cache expiry. This prevents entries from being served from cache after the record's natural DNS TTL has elapsed while still respecting `cache_ttl` as a minimum.
 - `response_template` configuration parameter allows the built-in HTML error template to be replaced with a custom one. The value may be a file path (read at provision time if the file exists) or an inline Go `html/template` string (used directly when no file is found at the given path). Any file error other than not-found is treated as a hard failure to prevent a misconfigured path from silently falling back to literal interpretation. The template receives `.Title`, `.Detail`, and `.Resolution` fields. Accepts a Caddy global placeholder (e.g. `{env.TEMPLATE_PATH}`).
 - `log_redirects` configuration flag enables structured info-level access logging. When set, every request emits a log entry: successful redirects as `redirect` (fields: `client`, `method`, `host`, `uri`, `target`, `status`), error responses as `redirect error` (same fields plus `reason`: `invalid_host`, `rate_limited`, `dns_lookup_failed`, or `no_valid_txt_record`). Disabled by default; no per-request logging occurs unless explicitly enabled.
+- All configuration parameters now accept Caddy global placeholders (e.g. `{env.VAR_NAME}`) in addition to their literal values. Placeholders are expanded at provision time using `caddy.NewReplacer()`, so environment variables and other Caddy-provided global values can be used to configure any parameter without rebuilding the binary or changing the Caddyfile.
 - `examples/error_template.html` — a dark-themed reference template matching the module's default error page style, suitable for use with `response_template`.
 
 ### Changed
@@ -17,13 +18,6 @@
 - Cache miss path in `lookupTXT` reduced from two defensive slice copies to one; the stored cache entry now holds the slice returned directly by the lookup function, and callers receive a copy only at read time.
 - All debug log calls converted to the zap checked-entry pattern (`logger.Check`) so field allocations are skipped entirely when debug logging is disabled.
 - Error responses now include a structured "What happened" detail and "How to resolve" guidance section. Each failure case (invalid host, rate-limited, DNS lookup failure, no valid redirect target) carries a specific explanation and actionable resolution message tailored to that error. The HTML template has been restyled accordingly.
-
-## v1.1.3 — 2026-03-30
-
-### Added
-- All configuration parameters now accept Caddy global placeholders (e.g. `{env.VAR_NAME}`) in addition to their literal values. Placeholders are expanded at provision time using `caddy.NewReplacer()`, so environment variables and other Caddy-provided global values can be used to configure any parameter without rebuilding the binary or changing the Caddyfile.
-
-### Changed
 - JSON schema for `status_code`, `max_unique_hosts_per_client`, `max_cache_size`, and `max_clients` now accepts both a bare integer (`302`) and a quoted string (`"302"` or `"{env.STATUS_CODE}"`). Bare integers continue to round-trip correctly; no changes to existing JSON configs are required.
 - JSON schema for `lookup_timeout`, `cache_ttl`, and `rate_window` is unchanged (these were already quoted duration strings in JSON via `caddy.Duration`). The underlying field type has changed from `caddy.Duration` to `string`; the serialised form is identical.
 - Caddyfile parsing of typed fields (durations and integers) is now deferred from `UnmarshalCaddyfile` to `Provision`. Parse errors for these fields are therefore reported at provision time rather than at Caddyfile parse time. The observable behaviour is the same — both prevent Caddy from starting — but the error message may differ slightly in format.
