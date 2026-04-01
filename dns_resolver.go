@@ -138,12 +138,12 @@ func (rd *RedirDns) storeLookup(query string, entry dnsCacheEntry) {
 	rd.cache[query] = entry
 }
 
-// newMiekgLookupFunc returns a lookupFunc that queries the given nameservers using
-// a miekg/dns client. Nameservers must already be in host:port form. Each nameserver
+// newMiekgLookupFunc returns a lookupFunc that queries the given resolvers using
+// a miekg/dns client. Resolvers must already be in host:port form. Each resolver
 // is tried in order; the first successful response is returned. NXDOMAIN is treated as
-// terminal and short-circuits the remaining nameservers. A single dns.Client is shared
+// terminal and short-circuits the remaining resolvers. A single dns.Client is shared
 // across all calls (it is safe for concurrent use).
-func newMiekgLookupFunc(nameservers []string) func(context.Context, string) ([]string, time.Duration, error) {
+func newMiekgLookupFunc(resolvers []string) func(context.Context, string) ([]string, time.Duration, error) {
 	client := &dns.Client{}
 	return func(ctx context.Context, query string) ([]string, time.Duration, error) {
 		msg := new(dns.Msg)
@@ -151,7 +151,7 @@ func newMiekgLookupFunc(nameservers []string) func(context.Context, string) ([]s
 		msg.RecursionDesired = true
 
 		var lastErr error
-		for _, ns := range nameservers {
+		for _, ns := range resolvers {
 			resp, _, err := client.ExchangeContext(ctx, msg, ns)
 			if err != nil {
 				lastErr = err
@@ -162,7 +162,7 @@ func newMiekgLookupFunc(nameservers []string) func(context.Context, string) ([]s
 				return nil, 0, errNoTXTRecord
 			}
 			if resp.Rcode != dns.RcodeSuccess {
-				lastErr = fmt.Errorf("nameserver %s returned rcode %s", ns, dns.RcodeToString[resp.Rcode])
+				lastErr = fmt.Errorf("resolver %s returned rcode %s", ns, dns.RcodeToString[resp.Rcode])
 				continue
 			}
 			var (

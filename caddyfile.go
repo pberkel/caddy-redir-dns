@@ -98,12 +98,12 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	for i, p := range rd.TrustedProxies {
 		rd.TrustedProxies[i] = repl.ReplaceAll(p, "")
 	}
-	for i, ns := range rd.Nameservers {
+	for i, ns := range rd.Resolvers {
 		ns = repl.ReplaceAll(ns, "")
 		if _, _, err := net.SplitHostPort(ns); err != nil {
 			ns = net.JoinHostPort(ns, "53")
 		}
-		rd.Nameservers[i] = ns
+		rd.Resolvers[i] = ns
 	}
 	rd.ResponseTemplate = repl.ReplaceAll(rd.ResponseTemplate, "")
 
@@ -132,8 +132,8 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("invalid max_clients %q: %v", rd.MaxClients, err)
 	}
 
-	if len(rd.Nameservers) > 0 {
-		rd.lookupFunc = newMiekgLookupFunc(rd.Nameservers)
+	if len(rd.Resolvers) > 0 {
+		rd.lookupFunc = newMiekgLookupFunc(rd.Resolvers)
 	}
 
 	rd.trustedNets, err = parseTrustedProxyPrefixes(rd.TrustedProxies)
@@ -179,7 +179,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Duration("unique_host_window", rd.uniqueHostWindow),
 			zap.Int("max_unique_hosts_per_client", rd.maxUniqueHostsPerClient),
 			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
-			zap.Int("nameserver_entries", len(rd.Nameservers)),
+			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
 		)
 	}
@@ -243,7 +243,7 @@ func (rd *RedirDns) Validate() error {
 	if err != nil || maxClients <= 0 {
 		return fmt.Errorf("max_clients must be greater than 0")
 	}
-	for _, ns := range rd.Nameservers {
+	for _, ns := range rd.Resolvers {
 		host, port, splitErr := net.SplitHostPort(ns)
 		if splitErr != nil {
 			// no port — entire value is the host; port validation below is skipped.
@@ -254,12 +254,12 @@ func (rd *RedirDns) Validate() error {
 			port = ""
 		}
 		if net.ParseIP(host) == nil && !isValidDNSHost(host) {
-			return fmt.Errorf("invalid nameserver address %q", ns)
+			return fmt.Errorf("invalid resolver address %q", ns)
 		}
 		if port != "" {
 			p, err := strconv.Atoi(port)
 			if err != nil || p < 1 || p > 65535 {
-				return fmt.Errorf("invalid port in nameserver address %q", ns)
+				return fmt.Errorf("invalid port in resolver address %q", ns)
 			}
 		}
 	}
@@ -324,13 +324,13 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				for d.NextArg() {
 					rd.TrustedProxies = append(rd.TrustedProxies, d.Val())
 				}
-			case "nameserver":
+			case "resolvers":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.Nameservers = append(rd.Nameservers, d.Val())
+				rd.Resolvers = append(rd.Resolvers, d.Val())
 				for d.NextArg() {
-					rd.Nameservers = append(rd.Nameservers, d.Val())
+					rd.Resolvers = append(rd.Resolvers, d.Val())
 				}
 			case "response_template":
 				if !d.NextArg() {

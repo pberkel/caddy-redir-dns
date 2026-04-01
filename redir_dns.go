@@ -81,10 +81,10 @@ type RedirDns struct {
 
 	// --- DNS lookup ---
 
-	// Custom DNS nameservers (hostnames or IPs, optional port) used for TXT lookups.
+	// Custom DNS resolvers (hostnames or IPs, optional port) used for TXT lookups.
 	// When empty the system resolver is used. Multiple entries are tried in order
 	// until one succeeds.
-	Nameservers []string `json:"nameservers,omitempty"`
+	Resolvers []string `json:"resolvers,omitempty"`
 	// Maximum time to wait for DNS TXT lookups before falling back. Default: 2s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.LOOKUP_TIMEOUT}").
 	LookupTimeout string `json:"lookup_timeout,omitempty"`
@@ -290,7 +290,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			"Redirect Failure",
 			dnsDetail,
 			fmt.Sprintf("Create a TXT DNS record at %s containing a valid absolute HTTP or HTTPS redirect URL. "+
-				"If the record already exists, verify that the configured nameserver is reachable and that "+
+				"If the record already exists, verify that the configured resolver is reachable and that "+
 				"the lookup_timeout setting is sufficient.", txtQuery))
 	}
 

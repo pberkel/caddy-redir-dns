@@ -29,7 +29,7 @@ Several optional parameters are also supported:
 		status_code                 302
 		dns_prefix                  "_redirdns"
 
-		nameserver                  1.1.1.1 8.8.8.8
+		resolvers                   1.1.1.1 8.8.8.8
 		lookup_timeout              2s
 		cache_ttl                   30s
 		max_cache_size              10000
@@ -66,7 +66,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 
 **DNS lookup**
 
-* __nameserver__ specifies one or more custom DNS nameservers to use for TXT record lookups. Each value is a hostname or IP address with an optional port (e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Multiple addresses may be given space-separated on a single line or across multiple `nameserver` lines; they are tried in order and port `53` is assumed when no port is specified. When this parameter is absent the system resolver is used.
+* __resolvers__ specifies one or more custom DNS resolvers to use for TXT record lookups. Each value is a hostname or IP address with an optional port (e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Multiple addresses may be given space-separated on a single line or across multiple `resolvers` lines; they are tried in order and port `53` is assumed when no port is specified. When this parameter is absent the system resolver is used.
 * __lookup_timeout__ specifies the maximum time to wait for each DNS TXT lookup before applying fallback behavior.  Duration format must be valid for Go's `time.ParseDuration` (for example `500ms`, `2s`).  Default value: `2s`.
 * __cache_ttl__ specifies the minimum time that successful or failed DNS TXT lookup results are cached in memory. When the TXT record's own DNS TTL exceeds this value the record TTL is used instead, so entries are never served from cache longer than the upstream resolver intended.  Duration format must be valid for Go's `time.ParseDuration` (for example `30s`, `2m`).  Default value: `30s`.
 * __max_cache_size__ specifies the maximum number of DNS TXT lookup results held in the in-memory cache. When the limit is reached, the entry with the soonest expiry is evicted before inserting a new one.  Default value: `10000`.

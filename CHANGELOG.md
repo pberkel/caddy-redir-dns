@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.1 — 2026-04-01
+
+### Changed
+- Renamed the `nameserver` configuration parameter to `resolvers` to conform to Caddy naming conventions. The JSON field has been updated from `nameservers` to `resolvers` accordingly.
+
+---
+
 ## v1.2.0 — 2026-03-31
 
 ### Added
