@@ -1,10 +1,15 @@
 # Changelog
 
-## v1.3.0 — 2026-04-09
+## v1.3.0 — 2026-04-10
 
 ### Added
-- `status_code` now accepts the keywords `temporary` and `permanent` in addition to numeric codes. Keywords select the method-appropriate redirect code at request time: `temporary` emits `302` for `GET`/`HEAD` and `307` for all other methods; `permanent` emits `301` for `GET`/`HEAD` and `308` for all other methods. This ensures that `POST`, `PUT`, and `DELETE` requests are redirected with method-preserving codes without any operator intervention. Numeric codes (`301`, `302`, `303`, `307`, `308`) continue to emit that exact code regardless of request method. The same keyword logic applies when a TXT record specifies `permanent` or `temporary` as its status token.
-- The module-level default for `status_code` has changed from the numeric `302` to the keyword `temporary`, so the method-aware selection is active by default. `GET` and `HEAD` traffic is unaffected (still receives `302`); `POST`, `PUT`, `DELETE`, and other non-safe methods now receive `307` instead of `302` unless an explicit numeric code is configured.
+- `status_code` now accepts three keywords in addition to numeric codes:
+  - `temporary` — `302` for `GET`/`HEAD`, `307` for all other methods.
+  - `permanent` — `301` for `GET`/`HEAD`, `308` for all other methods.
+  - `html` — `200 OK` with an HTML body containing a `<meta http-equiv="refresh">` and a JavaScript `window.location.replace()` redirect. Browsers follow the redirect transparently; API clients that check the HTTP status code or `Content-Type` receive a `200` with an HTML document rather than a `3xx` redirect.
+
+  The keyword logic applies both to the module-level `status_code` configuration and to the per-record status token in TXT record values. Numeric codes (`301`, `302`, `303`, `307`, `308`) continue to emit that exact code regardless of request method.
+- The module-level default for `status_code` has changed from the numeric `302` to the keyword `temporary`, so method-aware selection is active by default. `GET` and `HEAD` traffic is unaffected (still receives `302`); `POST`, `PUT`, `DELETE`, and other non-safe methods now receive `307` instead of `302` unless an explicit numeric code is configured.
 
 ### Changed
 - The per-client DNS lookup guard configuration directives have been renamed to more accurately describe what the feature does — it bounds how many *distinct hostnames* a single client can trigger first-time DNS lookups for, not how many requests it can make. Repeat lookups for a hostname already seen within the window are always free and do not consume a slot. The three affected directives and their JSON field names are:

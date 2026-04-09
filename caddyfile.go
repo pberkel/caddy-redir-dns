@@ -191,9 +191,11 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		rd.statusCodeAuto, rd.statusCodePermanent = true, false
 	case "permanent":
 		rd.statusCodeAuto, rd.statusCodePermanent = true, true
+	case "html":
+		rd.statusCodeHTML = true
 	default:
 		if rd.statusCode, err = strconv.Atoi(string(rd.StatusCode)); err != nil {
-			return fmt.Errorf("invalid status_code %q: must be a numeric code (301/302/303/307/308) or \"temporary\"/\"permanent\"", rd.StatusCode)
+			return fmt.Errorf("invalid status_code %q: must be a numeric code (301/302/303/307/308) or \"temporary\"/\"permanent\"/\"html\"", rd.StatusCode)
 		}
 		if !isSupportedStatusCode(rd.statusCode) {
 			return fmt.Errorf("unsupported status_code %d", rd.statusCode)

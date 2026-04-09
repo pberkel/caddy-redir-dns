@@ -61,7 +61,12 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 **Redirect**
 
 * __default_target__ specifies a redirect URL that will be used if the module is unable to determine an appropriate redirect location (i.e. the hostname is an IP address, the TXT record doesn't exist or is invalid).  If this parameter is not set and an error occurs during redirect processing, a simple 404 response will be returned.
-* __status_code__ specifies the HTTP redirect status to use. Accepts a numeric code (`301`, `302`, `303`, `307`, `308`) or the keywords `temporary` or `permanent`. Keywords select the method-appropriate code automatically: `temporary` emits `302` for `GET`/`HEAD` and `307` for all other methods; `permanent` emits `301` for `GET`/`HEAD` and `308` for all other methods. This ensures that `POST`, `PUT`, and `DELETE` requests are redirected with method-preserving codes without any additional configuration. Numeric codes always emit that exact code regardless of request method. Default value: `temporary`.
+* __status_code__ specifies the HTTP redirect status to use. Accepts a numeric code (`301`, `302`, `303`, `307`, `308`) or one of three keywords:
+  * `temporary` — `302` for `GET`/`HEAD`, `307` for all other methods (default).
+  * `permanent` — `301` for `GET`/`HEAD`, `308` for all other methods.
+  * `html` — `200 OK` with an HTML body containing a `<meta http-equiv="refresh">` and a JavaScript `window.location.replace()` redirect. Browsers follow the redirect transparently; API clients that inspect the HTTP status code or `Content-Type` receive a `200` with an HTML document rather than a `3xx` redirect.
+
+  Keywords are preferred over numeric codes because `temporary` and `permanent` automatically select the method-preserving code (`307`/`308`) for non-`GET` requests, preserving the request body without any additional configuration. Numeric codes always emit that exact code regardless of request method.
 * __dns_prefix__ specifies the prefix used to construct the TXT DNS record name where redirect information for a given host is stored in the format `<dns_prefix>.<host>`.  Default value: `"_redirdns"`.
 
 **DNS lookup**
@@ -108,7 +113,7 @@ _redirdns.mail.example.com. IN TXT "https://www.redirect-target.com/mail/ 301"
 _redirdns.blog.example.com. IN TXT "https://www.redirect-target.com/blog/ 308"
 ```
 
-It is also possible to use the keywords `permanent` and `temporary` instead of a numeric code.  Unlike numeric codes, keywords select the method-appropriate code automatically at request time: `temporary` emits `302` for `GET`/`HEAD` and `307` for all other methods; `permanent` emits `301` for `GET`/`HEAD` and `308` for all other methods.  Using keywords is preferred over numeric `301`/`302` codes because they correctly preserve the request method and body for `POST`, `PUT`, and `DELETE` redirects without any extra configuration.
+It is also possible to use the keywords `permanent`, `temporary`, or `html` instead of a numeric code.  Unlike numeric codes, `temporary` and `permanent` select the method-appropriate code at request time: `temporary` emits `302` for `GET`/`HEAD` and `307` for all other methods; `permanent` emits `301` for `GET`/`HEAD` and `308` for all other methods.  Using these keywords is preferred over numeric `301`/`302` codes because they preserve the request method and body for `POST`, `PUT`, and `DELETE` redirects without any extra configuration.  The `html` keyword sends a `200 OK` with an HTML meta-refresh and JavaScript redirect — browsers follow it silently while API clients that check the HTTP status code or `Content-Type` receive a plain `200` with an HTML document.
 
 ```
 _redirdns.one.example.com. IN TXT "https://www.redirect-target.com permanent"

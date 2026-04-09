@@ -513,6 +513,88 @@ func TestServeHTTPDefaultStatusCodeIsMethodAware(t *testing.T) {
 	}
 }
 
+func TestServeHTTPHtmlRedirectMode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		token  string // TXT record status token; empty means no token (use module default)
+		method string
+	}{
+		{"txt-token/GET", "html", http.MethodGet},
+		{"txt-token/POST", "html", http.MethodPost},
+		{"module-default/GET", "", http.MethodGet},
+		{"module-default/POST", "", http.MethodPost},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rd := newTestRedirDns(t)
+			rd.statusCodeHTML = true // module-level html mode
+			target := "https://target.example/path"
+			txt := target
+			if tc.token != "" {
+				// per-TXT-record html token; start from non-html module default
+				rd.statusCodeHTML = false
+				rd.statusCodeAuto = true
+				txt = target + " " + tc.token
+			}
+			rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+				return []string{txt}, 0, nil
+			}
+			req := httptest.NewRequest(tc.method, "http://example.com/", nil)
+			req.Host = "www.example.com"
+			rr := httptest.NewRecorder()
+			if err := rd.ServeHTTP(rr, req, nil); err != nil {
+				t.Fatalf("ServeHTTP returned error: %v", err)
+			}
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+			}
+			if ct := rr.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+				t.Fatalf("Content-Type = %q, want text/html; charset=utf-8", ct)
+			}
+			if loc := rr.Header().Get("Location"); loc != "" {
+				t.Fatalf("Location header should be absent for html redirect, got %q", loc)
+			}
+			body := rr.Body.String()
+			if !strings.Contains(body, target) {
+				t.Fatalf("response body does not contain target URL %q", target)
+			}
+			if !strings.Contains(body, "http-equiv=\"refresh\"") {
+				t.Fatalf("response body missing meta http-equiv=refresh")
+			}
+			if !strings.Contains(body, "window.location.replace") {
+				t.Fatalf("response body missing window.location.replace")
+			}
+		})
+	}
+}
+
+func TestServeHTTPHtmlRedirectDefaultTarget(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	rd.statusCodeHTML = true
+	rd.DefaultTarget = "https://default.example/"
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return nil, 0, errNoTXTRecord
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.Host = "www.example.com"
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !strings.Contains(rr.Body.String(), rd.DefaultTarget) {
+		t.Fatalf("response body does not contain default target URL")
+	}
+}
+
 func TestServeHTTPExplicitNumericStatusCodeIgnoresMethod(t *testing.T) {
 	t.Parallel()
 
