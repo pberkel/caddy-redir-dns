@@ -2,15 +2,12 @@ package redirdns
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,39 +30,6 @@ const (
 	// Default HTTP response template (minified; canonical source: examples/error_template.html)
 	defaultResponseTemplate = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>{{.Title}}</title><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#4f8ef7;--warn:#f5c842}body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 2rem;height:56px;display:flex;align-items:center;gap:2rem}.logo{font-size:1.1rem;font-weight:700;color:var(--accent);letter-spacing:-0.01em}nav{display:flex;gap:1.5rem;margin-left:auto}nav a{color:var(--muted);text-decoration:none;font-size:0.875rem;transition:color 0.15s}nav a:hover{color:var(--text)}main{flex:1;display:flex;align-items:flex-start;justify-content:center;padding:6rem 1.5rem 4rem}.card{width:100%;max-width:640px}.badge{display:inline-block;font-size:0.7rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:0.2rem 0.55rem;margin-bottom:1rem}h1{font-size:1.6rem;font-weight:600;margin-bottom:2rem;line-height:1.3}section{margin-bottom:1.5rem}h2{font-size:0.7rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:0.5rem}.detail{font-family:ui-monospace,"Cascadia Code",monospace;font-size:0.875rem;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--warn);border-radius:0 6px 6px 0;padding:0.75rem 1rem;color:var(--text);word-break:break-word}.resolution{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:0.75rem 1rem;font-size:0.9rem;line-height:1.65;color:var(--muted)}footer{background:var(--surface);border-top:1px solid var(--border);padding:0 2rem;height:48px;display:flex;align-items:center;justify-content:center;font-size:0.8rem;color:var(--muted)}footer a{color:var(--muted);text-decoration:none;transition:color 0.15s}footer a:hover{color:var(--text)}</style></head><body><header><span class="logo">caddy-redir-dns</span><nav><a href="https://github.com/pberkel/caddy-redir-dns#configuration">Documentation</a><a href="https://github.com/pberkel/caddy-redir-dns">GitHub</a></nav></header><main><div class="card"><div class="badge">Error</div><h1>{{.Title}}</h1><section><h2>What happened</h2><div class="detail">{{.Detail}}</div></section><section><h2>How to resolve</h2><div class="resolution">{{.Resolution}}</div></section></div></main><footer><span>Powered by <a href="https://caddyserver.com">Caddy</a> and <a href="https://github.com/pberkel/caddy-redir-dns">caddy-redir-dns</a></span></footer></body></html>`
 )
-
-var txtPrefixRegex = regexp.MustCompile(`^[_a-zA-Z0-9]([_a-zA-Z0-9-]{0,61}[_a-zA-Z0-9])?$`)
-
-// StringOrInt is a config field type that accepts both a bare JSON number (e.g. 302)
-// and a quoted string (e.g. "302" or "{env.STATUS_CODE}"). Values are stored as a
-// string so that Caddy environment-variable placeholders can be expanded in Provision
-// before the integer is parsed. JSON serialisation round-trips numeric strings back
-// to bare numbers for backward compatibility.
-type StringOrInt string
-
-// UnmarshalJSON accepts either a bare JSON number or a quoted string.
-func (s *StringOrInt) UnmarshalJSON(b []byte) error {
-	var n int
-	if err := json.Unmarshal(b, &n); err == nil {
-		*s = StringOrInt(strconv.Itoa(n))
-		return nil
-	}
-	var str string
-	if err := json.Unmarshal(b, &str); err != nil {
-		return fmt.Errorf("cannot unmarshal %s into StringOrInt", b)
-	}
-	*s = StringOrInt(str)
-	return nil
-}
-
-// MarshalJSON emits a bare JSON number when the stored value is purely numeric,
-// and a quoted string otherwise, preserving backward-compatible JSON round-trips.
-func (s StringOrInt) MarshalJSON() ([]byte, error) {
-	if _, err := strconv.Atoi(string(s)); err == nil {
-		return []byte(string(s)), nil
-	}
-	return json.Marshal(string(s))
-}
 
 // RedirDns is a Caddy module implementing HTTP redirects stored in DNS TXT records
 type RedirDns struct {
@@ -95,19 +59,20 @@ type RedirDns struct {
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CACHE_SIZE}").
 	MaxCacheSize StringOrInt `json:"max_cache_size,omitempty"`
 
-	// --- Rate limiting ---
+	// --- DNS lookup guard ---
 
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
-	// Sliding window used to track per-client unique hosts. Default: 1m
-	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.UNIQUE_HOST_WINDOW}").
-	UniqueHostWindow string `json:"unique_host_window,omitempty"`
-	// Maximum unique hosts allowed per client within unique_host_window. Default: 50
-	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_UNIQUE_HOSTS_PER_CLIENT}").
-	MaxUniqueHostsPerClient StringOrInt `json:"max_unique_hosts_per_client,omitempty"`
-	// Maximum number of per-client rate-limit entries tracked in memory. Default: 100000
-	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CLIENTS}").
-	MaxClients StringOrInt `json:"max_clients,omitempty"`
+	// Sliding window for per-client DNS lookup host tracking. Default: 1m
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.HOST_LIMIT_WINDOW}").
+	HostLimitWindow string `json:"host_limit_window,omitempty"`
+	// Maximum distinct hostnames a single client may trigger DNS lookups for within
+	// host_limit_window before further new-hostname lookups are skipped. Default: 50
+	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_HOSTS_PER_CLIENT}").
+	MaxHostsPerClient StringOrInt `json:"max_hosts_per_client,omitempty"`
+	// Maximum number of per-client host trackers held in memory. Default: 100000
+	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_TRACKED_CLIENTS}").
+	MaxTrackedClients StringOrInt `json:"max_tracked_clients,omitempty"`
 
 	// --- Response ---
 
@@ -143,13 +108,13 @@ type RedirDns struct {
 	maxCacheSize int
 	lookupGroup  singleflight.Group
 
-	// rate limiting
-	clientsMu               sync.Mutex
-	clientTrackers          map[string]*clientHostTracker
-	maxTrackedClients       int
-	uniqueHostWindow        time.Duration
-	maxUniqueHostsPerClient int
-	trustedNets             []netip.Prefix
+	// DNS lookup guard
+	hostLimitMu         sync.Mutex
+	hostTrackers        map[string]*hostTracker
+	maxTrackedClients   int
+	hostLimitWindow     time.Duration
+	maxHostsPerClient   int
+	trustedNets         []netip.Prefix
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler. The next handler is never
@@ -173,21 +138,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		if c := rd.logger.Check(zapcore.DebugLevel, "Request cannot be processed because the Host header is invalid"); c != nil {
 			c.Write(zap.String("host", r.Host), zap.Error(err))
 		}
-		if rd.DefaultTarget != "" {
-			// redirect to default target if supplied
-			if rd.LogRedirects {
-				if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
-					c.Write(
-						zap.String("client", clientIP),
-						zap.String("method", r.Method),
-						zap.String("host", r.Host),
-						zap.String("uri", r.RequestURI),
-						zap.String("target", rd.DefaultTarget),
-						zap.Int("status", rd.statusCode),
-					)
-				}
-			}
-			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
+		if handled, err := rd.redirectToDefault(w, r, clientIP, r.Host); handled {
+			return err
 		}
 		if rd.LogRedirects {
 			if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
@@ -209,13 +161,13 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				"properly formed domain name (e.g. www.example.com).")
 	}
 
-	// check if client should be rate-limited
-	if rd.isClientHostRateLimited(r, reqHost, time.Now()) {
-		if c := rd.logger.Check(zapcore.DebugLevel, "DNS lookup skipped because client exceeded unique host rate limit in active window"); c != nil {
+	// check if client has exceeded the per-client distinct-hostname DNS lookup limit
+	if rd.exceedsPerClientHostLimit(r, reqHost, time.Now()) {
+		if c := rd.logger.Check(zapcore.DebugLevel, "DNS lookup skipped: client exceeded per-client host limit"); c != nil {
 			c.Write(
 				zap.String("host", reqHost),
-				zap.Duration("window", rd.uniqueHostWindow),
-				zap.Int("max_unique_hosts", rd.maxUniqueHostsPerClient),
+				zap.Duration("window", rd.hostLimitWindow),
+				zap.Int("max_hosts_per_client", rd.maxHostsPerClient),
 			)
 		}
 		if rd.LogRedirects {
@@ -232,10 +184,10 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		}
 		return rd.writeHtmlResponse(w, http.StatusTooManyRequests,
 			"Too Many Requests",
-			fmt.Sprintf("This client has exceeded the limit of %d unique hostnames within a %s window.", rd.maxUniqueHostsPerClient, rd.uniqueHostWindow),
-			"The per-client unique-hostname limit exists to prevent DNS amplification attacks. "+
-				"Reduce the rate of requests to distinct hostnames. Requests to previously seen "+
-				"hostnames within the same window are not counted against the limit.")
+			fmt.Sprintf("This client has triggered DNS lookups for more than %d distinct hostnames within a %s window.", rd.maxHostsPerClient, rd.hostLimitWindow),
+			"The per-client DNS lookup guard limits how many distinct hostnames a single client can trigger "+
+				"DNS lookups for within a window, to prevent DNS amplification. Repeat requests to the same "+
+				"hostname within the window are not counted against the limit.")
 	}
 
 	// create DNS TXT query and perform lookup
@@ -252,21 +204,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			)
 		}
 		// DNS lookup returned no / invalid response
-		if rd.DefaultTarget != "" {
-			// redirect to default target if supplied
-			if rd.LogRedirects {
-				if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
-					c.Write(
-						zap.String("client", clientIP),
-						zap.String("method", r.Method),
-						zap.String("host", reqHost),
-						zap.String("uri", r.RequestURI),
-						zap.String("target", rd.DefaultTarget),
-						zap.Int("status", rd.statusCode),
-					)
-				}
-			}
-			return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
+		if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost); handled {
+			return err
 		}
 		var dnsDetail string
 		if err != nil {
@@ -325,21 +264,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	}
 
 	// none of the TXT records contained a valid redirect
-	if rd.DefaultTarget != "" {
-		// redirect to default target if supplied
-		if rd.LogRedirects {
-			if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
-				c.Write(
-					zap.String("client", clientIP),
-					zap.String("method", r.Method),
-					zap.String("host", reqHost),
-					zap.String("uri", r.RequestURI),
-					zap.String("target", rd.DefaultTarget),
-					zap.Int("status", rd.statusCode),
-				)
-			}
-		}
-		return writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
+	if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost); handled {
+		return err
 	}
 
 	if rd.LogRedirects {
@@ -360,6 +286,28 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		"Each TXT record value must be a valid absolute HTTP or HTTPS URL containing only printable ASCII "+
 			"characters. A redirect status code (301, 302, 303, 307, or 308) may optionally follow the URL "+
 			"separated by a space. URLs must not include credentials (user:pass@host).")
+}
+
+// redirectToDefault redirects to DefaultTarget when configured, logging the
+// redirect if log_redirects is enabled. Reports whether the redirect was
+// written so the caller can return immediately.
+func (rd *RedirDns) redirectToDefault(w http.ResponseWriter, r *http.Request, clientIP, host string) (bool, error) {
+	if rd.DefaultTarget == "" {
+		return false, nil
+	}
+	if rd.LogRedirects {
+		if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
+			c.Write(
+				zap.String("client", clientIP),
+				zap.String("method", r.Method),
+				zap.String("host", host),
+				zap.String("uri", r.RequestURI),
+				zap.String("target", rd.DefaultTarget),
+				zap.Int("status", rd.statusCode),
+			)
+		}
+	}
+	return true, writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
 }
 
 // writeRedirectResponse writes a redirect response with the given status code and Location header.
@@ -509,7 +457,7 @@ func normalizeRequestHost(host string) (string, error) {
 	if reqHost == "" {
 		return "", fmt.Errorf("empty host header")
 	}
-	if ip := net.ParseIP(reqHost); ip != nil {
+	if _, err := netip.ParseAddr(reqHost); err == nil {
 		return "", fmt.Errorf("host is an IP address")
 	}
 	if !isValidDNSHost(reqHost) {
@@ -586,36 +534,6 @@ func isValidAbsoluteURL(location string) bool {
 	}
 	// must have a non-empty host
 	return parsedUrl.Host != ""
-}
-
-// classifyLookupError returns a short, log-safe string describing the category of a
-// DNS lookup error. Used to populate the "reason" field in debug log messages without
-// including raw error text that could contain resolver-supplied data.
-func classifyLookupError(err error) string {
-	if err == nil {
-		return "none"
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "timeout"
-	}
-	if errors.Is(err, errNoTXTRecord) {
-		return "not_found"
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		if dnsErr.IsNotFound {
-			return "nxdomain"
-		}
-		if dnsErr.IsTimeout {
-			return "timeout"
-		}
-		if dnsErr.IsTemporary {
-			return "temporary_dns_error"
-		}
-		return "dns_error"
-	}
-
-	return "lookup_error"
 }
 
 func isSupportedStatusCode(code int) bool {

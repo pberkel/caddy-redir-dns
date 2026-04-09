@@ -316,8 +316,8 @@ func TestServeHTTPHostCardinalityRateLimitSkipsDNSLookup(t *testing.T) {
 
 	rd := newTestRedirDns(t)
 	rd.DefaultTarget = "https://default.example/"
-	rd.maxUniqueHostsPerClient = 2
-	rd.uniqueHostWindow = time.Minute
+	rd.maxHostsPerClient = 2
+	rd.hostLimitWindow = time.Minute
 
 	var calls atomic.Int64
 	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
@@ -359,8 +359,8 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	t.Parallel()
 
 	rd := newTestRedirDns(t)
-	rd.maxUniqueHostsPerClient = 1
-	rd.uniqueHostWindow = 30 * time.Millisecond
+	rd.maxHostsPerClient = 1
+	rd.hostLimitWindow = 30 * time.Millisecond
 
 	var calls atomic.Int64
 	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
@@ -405,44 +405,40 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsNonPositiveLookupTimeoutOrCacheTTL(t *testing.T) {
+func TestProvisionRejectsInvalidConstraints(t *testing.T) {
 	t.Parallel()
 
+	caddyCtx := caddy.Context{Context: context.Background()}
+
 	rd := New()
-	rd.logger = zap.NewNop()
 	rd.LookupTimeout = "0"
-	if err := rd.Validate(); err == nil {
-		t.Fatalf("expected validate error for zero lookup timeout")
+	if err := rd.Provision(caddyCtx); err == nil {
+		t.Fatalf("expected provision error for zero lookup timeout")
 	}
 
 	rd = New()
-	rd.logger = zap.NewNop()
 	rd.LookupTimeout = "31s"
-	if err := rd.Validate(); err == nil {
-		t.Fatalf("expected validate error for lookup_timeout exceeding maximum")
+	if err := rd.Provision(caddyCtx); err == nil {
+		t.Fatalf("expected provision error for lookup_timeout exceeding maximum")
 	}
 
 	rd = New()
-	rd.logger = zap.NewNop()
 	rd.CacheTTL = "-1ns"
-	if err := rd.Validate(); err == nil {
-		t.Fatalf("expected validate error for negative cache ttl")
+	if err := rd.Provision(caddyCtx); err == nil {
+		t.Fatalf("expected provision error for negative cache ttl")
 	}
 
 	rd = New()
-	rd.logger = zap.NewNop()
-	rd.UniqueHostWindow = "0"
-	if err := rd.Validate(); err == nil {
-		t.Fatalf("expected validate error for zero rate window")
+	rd.HostLimitWindow = "0"
+	if err := rd.Provision(caddyCtx); err == nil {
+		t.Fatalf("expected provision error for zero host limit window")
 	}
 
 	rd = New()
-	rd.logger = zap.NewNop()
-	rd.MaxUniqueHostsPerClient = "0"
-	if err := rd.Validate(); err == nil {
-		t.Fatalf("expected validate error for non-positive max_unique_hosts_per_client")
+	rd.MaxHostsPerClient = "0"
+	if err := rd.Provision(caddyCtx); err == nil {
+		t.Fatalf("expected provision error for non-positive max_hosts_per_client")
 	}
-
 }
 
 func newTestRedirDns(t *testing.T) *RedirDns {

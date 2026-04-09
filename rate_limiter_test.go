@@ -7,14 +7,14 @@ import (
 	"time"
 )
 
-func TestIsClientHostRateLimitedRespectsMaxClients(t *testing.T) {
+func TestExceedsPerClientHostLimitRespectsMaxTrackedClients(t *testing.T) {
 	t.Parallel()
 
 	const maxClients = 2
 	rd := newTestRedirDns(t)
 	rd.maxTrackedClients = maxClients
-	rd.maxUniqueHostsPerClient = 100
-	rd.uniqueHostWindow = time.Minute
+	rd.maxHostsPerClient = 100
+	rd.hostLimitWindow = time.Minute
 
 	makeReq := func(ip string) *http.Request {
 		req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
@@ -23,27 +23,27 @@ func TestIsClientHostRateLimitedRespectsMaxClients(t *testing.T) {
 	}
 
 	now := time.Now()
-	rd.isClientHostRateLimited(makeReq("203.0.113.1"), "a.example.com", now)
-	rd.isClientHostRateLimited(makeReq("203.0.113.2"), "b.example.com", now)
-	rd.isClientHostRateLimited(makeReq("203.0.113.3"), "c.example.com", now)
+	rd.exceedsPerClientHostLimit(makeReq("203.0.113.1"), "a.example.com", now)
+	rd.exceedsPerClientHostLimit(makeReq("203.0.113.2"), "b.example.com", now)
+	rd.exceedsPerClientHostLimit(makeReq("203.0.113.3"), "c.example.com", now)
 
-	rd.clientsMu.Lock()
-	clientsLen := len(rd.clientTrackers)
-	rd.clientsMu.Unlock()
+	rd.hostLimitMu.Lock()
+	clientsLen := len(rd.hostTrackers)
+	rd.hostLimitMu.Unlock()
 
 	if clientsLen > maxClients {
-		t.Fatalf("clients map size = %d, want <= %d", clientsLen, maxClients)
+		t.Fatalf("host trackers map size = %d, want <= %d", clientsLen, maxClients)
 	}
 }
 
-func TestIsClientHostRateLimitedFailsClosedForUnparseableRemoteAddr(t *testing.T) {
+func TestExceedsPerClientHostLimitFailsClosedForUnparseableRemoteAddr(t *testing.T) {
 	t.Parallel()
 
 	rd := newTestRedirDns(t)
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	req.RemoteAddr = "not-an-address"
-	if !rd.isClientHostRateLimited(req, "example.com", time.Now()) {
-		t.Fatal("expected isClientHostRateLimited to return true for unparseable RemoteAddr")
+	if !rd.exceedsPerClientHostLimit(req, "example.com", time.Now()) {
+		t.Fatal("expected exceedsPerClientHostLimit to return true for unparseable RemoteAddr")
 	}
 }
 

@@ -14,8 +14,8 @@ func TestUnmarshalCaddyfileParsesLookupTimeoutAndCacheTTL(t *testing.T) {
 redir_dns {
 	lookup_timeout 750ms
 	cache_ttl 45s
-	unique_host_window 90s
-	max_unique_hosts_per_client 77
+	host_limit_window 90s
+	max_hosts_per_client 77
 	trusted_proxies 10.0.0.0/8 192.168.0.0/16
 }
 `)
@@ -29,11 +29,11 @@ redir_dns {
 	if rd.CacheTTL != "45s" {
 		t.Fatalf("cache ttl = %q, want %q", rd.CacheTTL, "45s")
 	}
-	if rd.UniqueHostWindow != "90s" {
-		t.Fatalf("unique host window = %q, want %q", rd.UniqueHostWindow, "90s")
+	if rd.HostLimitWindow != "90s" {
+		t.Fatalf("host limit window = %q, want %q", rd.HostLimitWindow, "90s")
 	}
-	if rd.MaxUniqueHostsPerClient != "77" {
-		t.Fatalf("max unique hosts per client = %q, want %q", rd.MaxUniqueHostsPerClient, "77")
+	if rd.MaxHostsPerClient != "77" {
+		t.Fatalf("max hosts per client = %q, want %q", rd.MaxHostsPerClient, "77")
 	}
 	if len(rd.TrustedProxies) != 2 {
 		t.Fatalf("trusted proxies length = %d, want %d", len(rd.TrustedProxies), 2)

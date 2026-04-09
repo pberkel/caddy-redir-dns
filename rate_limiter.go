@@ -13,13 +13,13 @@ import (
 
 const (
 	// Default per-client window for unique host tracking
-	defaultRateLimitWindow = time.Minute
+	defaultHostLimitWindow = time.Minute
 
 	// Default maximum unique hosts per client in a window
-	defaultMaxUniqueHostsPerClient = 50
+	defaultMaxHostsPerClient = 50
 
 	// Default maximum number of tracked rate-limit clients
-	defaultMaxClients = 100_000
+	defaultMaxTrackedClients = 100_000
 
 	// Maximum number of bytes examined in an X-Forwarded-For header. The
 	// right-to-left walk only needs the tail of the header (the most recently
@@ -28,28 +28,28 @@ const (
 	maxXFFBytes = 1024
 )
 
-// clientHostTracker records the set of unique hostnames a single client has requested
-// within the current rate-limit window, together with the time each was last seen.
-// lastSeen is updated on every request and is used by the background cleanup goroutine
-// to identify trackers that have been idle for longer than uniqueHostWindow.
-type clientHostTracker struct {
+// hostTracker records the set of distinct hostnames a single client has triggered DNS
+// lookups for within the current host-limit window, together with the time each was
+// last seen. lastSeen is updated on every request and is used by the background cleanup
+// goroutine to identify trackers idle for longer than hostLimitWindow.
+type hostTracker struct {
 	hosts    map[string]time.Time // hostname → time last requested
 	lastSeen time.Time
 }
 
-// startRateLimiterCleanup starts a background goroutine that periodically
-// purges expired rate-limit state. It shuts down when the provisioning
-// context is cancelled (i.e. when Caddy replaces or stops this module instance).
-func (rd *RedirDns) startRateLimiterCleanup(ctx caddy.Context) {
+// startHostLimitCleanup starts a background goroutine that periodically purges
+// expired host-limit state. It shuts down when the provisioning context is
+// cancelled (i.e. when Caddy replaces or stops this module instance).
+func (rd *RedirDns) startHostLimitCleanup(ctx caddy.Context) {
 	go func() {
-		ticker := time.NewTicker(rd.uniqueHostWindow)
+		ticker := time.NewTicker(rd.hostLimitWindow)
 		defer ticker.Stop()
 		for {
 			select {
 			case now := <-ticker.C:
-				rd.clientsMu.Lock()
-				rd.cleanupRateLimitState(now)
-				rd.clientsMu.Unlock()
+				rd.hostLimitMu.Lock()
+				rd.cleanupHostLimitState(now)
+				rd.hostLimitMu.Unlock()
 			case <-ctx.Done():
 				return
 			}
@@ -57,20 +57,18 @@ func (rd *RedirDns) startRateLimiterCleanup(ctx caddy.Context) {
 	}()
 }
 
-// isClientHostRateLimited reports whether the client that sent r has exceeded the
-// unique-host cardinality limit for the current sliding window. It returns true
-// (rate-limited) in the following cases:
+// exceedsPerClientHostLimit reports whether the client that sent r has triggered DNS
+// lookups for more distinct hostnames than maxHostsPerClient within hostLimitWindow.
+// Returns true (limit exceeded) when:
 //   - the client's remote address cannot be parsed (fail-closed)
-//   - the client has already requested maxUniqueHostsPerClient distinct hostnames within uniqueHostWindow
+//   - the client has already triggered DNS lookups for maxHostsPerClient distinct
+//     hostnames within hostLimitWindow
 //
-// A hostname the client has requested before is always allowed through and its
-// timestamp is refreshed, so the limit applies only to the number of distinct hosts
-// within the window, not to repeat visits to the same host.
-//
-// Rate limiting is skipped entirely (returns false) when maxUniqueHostsPerClient or uniqueHostWindow is
-// not positive, allowing the feature to be effectively disabled.
-func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now time.Time) bool {
-	if rd.maxUniqueHostsPerClient <= 0 || rd.uniqueHostWindow <= 0 {
+// A hostname the client has looked up before is always allowed through and its
+// timestamp is refreshed — only first-time lookups within the window consume a slot.
+// Returns false (no limit) when maxHostsPerClient or hostLimitWindow is not positive.
+func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now time.Time) bool {
+	if rd.maxHostsPerClient <= 0 || rd.hostLimitWindow <= 0 {
 		return false
 	}
 	clientID := rd.clientIDFromRequest(r)
@@ -78,26 +76,26 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 		return true // fail-closed: unparseable remote address
 	}
 
-	rd.clientsMu.Lock()
-	defer rd.clientsMu.Unlock()
+	rd.hostLimitMu.Lock()
+	defer rd.hostLimitMu.Unlock()
 
-	tracker, ok := rd.clientTrackers[clientID]
+	tracker, ok := rd.hostTrackers[clientID]
 	if !ok {
-		// evict one entry before inserting a new one to keep the map within maxClients
-		if len(rd.clientTrackers) >= rd.maxTrackedClients {
-			rd.evictOneClient()
+		// evict one entry before inserting a new one to keep the map within maxTrackedClients
+		if len(rd.hostTrackers) >= rd.maxTrackedClients {
+			rd.evictOneHostTracker()
 		}
-		tracker = &clientHostTracker{
+		tracker = &hostTracker{
 			hosts: make(map[string]time.Time),
 		}
-		rd.clientTrackers[clientID] = tracker
+		rd.hostTrackers[clientID] = tracker
 	}
 
 	// sweep expired host entries for this client on the request path; the background
 	// goroutine handles full cleanup periodically, but this keeps per-client state
 	// accurate without waiting for the next tick
 	for h, seenAt := range tracker.hosts {
-		if now.Sub(seenAt) > rd.uniqueHostWindow {
+		if now.Sub(seenAt) > rd.hostLimitWindow {
 			delete(tracker.hosts, h)
 		}
 	}
@@ -108,7 +106,7 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 		tracker.hosts[host] = now
 		return false
 	}
-	if len(tracker.hosts) >= rd.maxUniqueHostsPerClient {
+	if len(tracker.hosts) >= rd.maxHostsPerClient {
 		return true
 	}
 	tracker.hosts[host] = now
@@ -116,29 +114,29 @@ func (rd *RedirDns) isClientHostRateLimited(r *http.Request, host string, now ti
 	return false
 }
 
-// evictOneClient removes an arbitrary client to make room when the map is at
-// capacity. It must be called with clientsMu held. The background goroutine already
-// prunes genuinely idle clients on every tick, so remaining entries at capacity
-// are all recently active; any eviction strategy is equivalent in practice.
+// evictOneHostTracker removes an arbitrary client to make room when the map is at
+// capacity. Must be called with hostLimitMu held. The background goroutine already
+// prunes idle trackers on every tick, so remaining entries at capacity are all
+// recently active; any eviction strategy is equivalent in practice.
 // A single map iteration is O(1) amortised and avoids an O(n) scan.
-func (rd *RedirDns) evictOneClient() {
-	for id := range rd.clientTrackers {
-		delete(rd.clientTrackers, id)
+func (rd *RedirDns) evictOneHostTracker() {
+	for id := range rd.hostTrackers {
+		delete(rd.hostTrackers, id)
 		return
 	}
 }
 
-// cleanupRateLimitState purges expired host entries and idle client trackers.
-// It must be called with clientsMu held.
-func (rd *RedirDns) cleanupRateLimitState(now time.Time) {
-	for clientID, tracker := range rd.clientTrackers {
+// cleanupHostLimitState purges expired host entries and idle trackers.
+// Must be called with hostLimitMu held.
+func (rd *RedirDns) cleanupHostLimitState(now time.Time) {
+	for clientID, tracker := range rd.hostTrackers {
 		for host, seenAt := range tracker.hosts {
-			if now.Sub(seenAt) > rd.uniqueHostWindow {
+			if now.Sub(seenAt) > rd.hostLimitWindow {
 				delete(tracker.hosts, host)
 			}
 		}
-		if len(tracker.hosts) == 0 && now.Sub(tracker.lastSeen) > rd.uniqueHostWindow {
-			delete(rd.clientTrackers, clientID)
+		if len(tracker.hosts) == 0 && now.Sub(tracker.lastSeen) > rd.hostLimitWindow {
+			delete(rd.hostTrackers, clientID)
 		}
 	}
 }
@@ -173,6 +171,13 @@ func (rd *RedirDns) clientIDFromRequest(r *http.Request) string {
 	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
 		if len(xff) > maxXFFBytes {
 			xff = xff[len(xff)-maxXFFBytes:]
+			// The truncation point may fall mid-address; skip the partial leading
+			// entry so the right-to-left walk only sees complete IP strings.
+			if idx := strings.Index(xff, ","); idx >= 0 {
+				xff = xff[idx+1:]
+			} else {
+				xff = "" // entire kept portion is a single (possibly partial) entry
+			}
 		}
 		for xff != "" {
 			var part string

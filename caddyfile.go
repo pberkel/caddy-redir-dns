@@ -1,11 +1,13 @@
 package redirdns
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,39 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+var txtPrefixRegex = regexp.MustCompile(`^[_a-zA-Z0-9]([_a-zA-Z0-9-]{0,61}[_a-zA-Z0-9])?$`)
+
+// StringOrInt is a config field type that accepts both a bare JSON number (e.g. 302)
+// and a quoted string (e.g. "302" or "{env.STATUS_CODE}"). Values are stored as a
+// string so that Caddy environment-variable placeholders can be expanded in Provision
+// before the integer is parsed. JSON serialisation round-trips numeric strings back
+// to bare numbers for backward compatibility.
+type StringOrInt string
+
+// UnmarshalJSON accepts either a bare JSON number or a quoted string.
+func (s *StringOrInt) UnmarshalJSON(b []byte) error {
+	var n int
+	if err := json.Unmarshal(b, &n); err == nil {
+		*s = StringOrInt(strconv.Itoa(n))
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(b, &str); err != nil {
+		return fmt.Errorf("cannot unmarshal %s into StringOrInt", b)
+	}
+	*s = StringOrInt(str)
+	return nil
+}
+
+// MarshalJSON emits a bare JSON number when the stored value is purely numeric,
+// and a quoted string otherwise, preserving backward-compatible JSON round-trips.
+func (s StringOrInt) MarshalJSON() ([]byte, error) {
+	if _, err := strconv.Atoi(string(s)); err == nil {
+		return []byte(string(s)), nil
+	}
+	return json.Marshal(string(s))
+}
 
 func init() {
 	caddy.RegisterModule(&RedirDns{})
@@ -34,20 +69,20 @@ func New() *RedirDns {
 		StatusCode:              StringOrInt(strconv.Itoa(defaultStatusCode)),
 		LookupTimeout:           defaultDnsLookupTimeout.String(),
 		CacheTTL:                defaultDnsCacheTTL.String(),
-		UniqueHostWindow:        defaultRateLimitWindow.String(),
-		MaxUniqueHostsPerClient: StringOrInt(strconv.Itoa(defaultMaxUniqueHostsPerClient)),
-		MaxCacheSize:            StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
-		MaxClients:              StringOrInt(strconv.Itoa(defaultMaxClients)),
-		resolver:                net.DefaultResolver,
-		statusCode:              defaultStatusCode,
-		lookupTTL:               defaultDnsCacheTTL,
-		lookupMax:               defaultDnsLookupTimeout,
-		cache:                   make(map[string]dnsCacheEntry),
-		maxCacheSize:            defaultMaxCacheSize,
-		clientTrackers:          make(map[string]*clientHostTracker),
-		maxTrackedClients:       defaultMaxClients,
-		uniqueHostWindow:        defaultRateLimitWindow,
-		maxUniqueHostsPerClient: defaultMaxUniqueHostsPerClient,
+		HostLimitWindow:   defaultHostLimitWindow.String(),
+		MaxHostsPerClient: StringOrInt(strconv.Itoa(defaultMaxHostsPerClient)),
+		MaxCacheSize:      StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
+		MaxTrackedClients: StringOrInt(strconv.Itoa(defaultMaxTrackedClients)),
+		resolver:          net.DefaultResolver,
+		statusCode:        defaultStatusCode,
+		lookupTTL:         defaultDnsCacheTTL,
+		lookupMax:         defaultDnsLookupTimeout,
+		cache:             make(map[string]dnsCacheEntry),
+		maxCacheSize:      defaultMaxCacheSize,
+		hostTrackers:      make(map[string]*hostTracker),
+		maxTrackedClients: defaultMaxTrackedClients,
+		hostLimitWindow:   defaultHostLimitWindow,
+		maxHostsPerClient: defaultMaxHostsPerClient,
 	}
 	return &rd
 }
@@ -90,46 +125,89 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	rd.DnsPrefix = repl.ReplaceAll(rd.DnsPrefix, "")
 	rd.LookupTimeout = repl.ReplaceAll(rd.LookupTimeout, "")
 	rd.CacheTTL = repl.ReplaceAll(rd.CacheTTL, "")
-	rd.UniqueHostWindow = repl.ReplaceAll(rd.UniqueHostWindow, "")
+	rd.HostLimitWindow = repl.ReplaceAll(rd.HostLimitWindow, "")
 	rd.StatusCode = StringOrInt(repl.ReplaceAll(string(rd.StatusCode), ""))
-	rd.MaxUniqueHostsPerClient = StringOrInt(repl.ReplaceAll(string(rd.MaxUniqueHostsPerClient), ""))
+	rd.MaxHostsPerClient = StringOrInt(repl.ReplaceAll(string(rd.MaxHostsPerClient), ""))
 	rd.MaxCacheSize = StringOrInt(repl.ReplaceAll(string(rd.MaxCacheSize), ""))
-	rd.MaxClients = StringOrInt(repl.ReplaceAll(string(rd.MaxClients), ""))
+	rd.MaxTrackedClients = StringOrInt(repl.ReplaceAll(string(rd.MaxTrackedClients), ""))
 	for i, p := range rd.TrustedProxies {
 		rd.TrustedProxies[i] = repl.ReplaceAll(p, "")
 	}
 	for i, ns := range rd.Resolvers {
 		ns = repl.ReplaceAll(ns, "")
-		if _, _, err := net.SplitHostPort(ns); err != nil {
-			ns = net.JoinHostPort(ns, "53")
+		host, port, splitErr := net.SplitHostPort(ns)
+		if splitErr != nil {
+			// No port — treat entire value as host, default to port 53.
+			host = ns
+			port = "53"
+			ns = net.JoinHostPort(host, port)
+		}
+		if net.ParseIP(host) == nil && !isValidDNSHost(host) {
+			return fmt.Errorf("invalid resolver address %q", ns)
+		}
+		p, parseErr := strconv.Atoi(port)
+		if parseErr != nil || p < 1 || p > 65535 {
+			return fmt.Errorf("invalid port in resolver address %q", ns)
 		}
 		rd.Resolvers[i] = ns
 	}
 	rd.ResponseTemplate = repl.ReplaceAll(rd.ResponseTemplate, "")
 
-	// parse duration fields
+	// validate fields whose constraints cannot be expressed as parse errors
+	if rd.DefaultTarget != "" && (!isValidAbsoluteURL(rd.DefaultTarget) || containsNonPrintableASCII(rd.DefaultTarget)) {
+		return fmt.Errorf("invalid absolute URL default_target '%s'", rd.DefaultTarget)
+	}
+	if !txtPrefixRegex.MatchString(rd.DnsPrefix) {
+		return fmt.Errorf("invalid dns_prefix '%s'", rd.DnsPrefix)
+	}
+
+	// parse and validate duration fields
 	if rd.lookupMax, err = time.ParseDuration(rd.LookupTimeout); err != nil {
 		return fmt.Errorf("invalid lookup_timeout %q: %v", rd.LookupTimeout, err)
+	}
+	if rd.lookupMax <= 0 {
+		return fmt.Errorf("lookup_timeout must be greater than 0")
+	}
+	if rd.lookupMax > maxLookupTimeout {
+		return fmt.Errorf("lookup_timeout must not exceed %s", maxLookupTimeout)
 	}
 	if rd.lookupTTL, err = time.ParseDuration(rd.CacheTTL); err != nil {
 		return fmt.Errorf("invalid cache_ttl %q: %v", rd.CacheTTL, err)
 	}
-	if rd.uniqueHostWindow, err = time.ParseDuration(rd.UniqueHostWindow); err != nil {
-		return fmt.Errorf("invalid unique_host_window %q: %v", rd.UniqueHostWindow, err)
+	if rd.lookupTTL <= 0 {
+		return fmt.Errorf("cache_ttl must be greater than 0")
+	}
+	if rd.hostLimitWindow, err = time.ParseDuration(rd.HostLimitWindow); err != nil {
+		return fmt.Errorf("invalid host_limit_window %q: %v", rd.HostLimitWindow, err)
+	}
+	if rd.hostLimitWindow <= 0 {
+		return fmt.Errorf("host_limit_window must be greater than 0")
 	}
 
-	// parse int fields
+	// parse and validate int fields
 	if rd.statusCode, err = strconv.Atoi(string(rd.StatusCode)); err != nil {
 		return fmt.Errorf("invalid status_code %q: %v", rd.StatusCode, err)
 	}
-	if rd.maxUniqueHostsPerClient, err = strconv.Atoi(string(rd.MaxUniqueHostsPerClient)); err != nil {
-		return fmt.Errorf("invalid max_unique_hosts_per_client %q: %v", rd.MaxUniqueHostsPerClient, err)
+	if !isSupportedStatusCode(rd.statusCode) {
+		return fmt.Errorf("unsupported status_code %d", rd.statusCode)
+	}
+	if rd.maxHostsPerClient, err = strconv.Atoi(string(rd.MaxHostsPerClient)); err != nil {
+		return fmt.Errorf("invalid max_hosts_per_client %q: %v", rd.MaxHostsPerClient, err)
+	}
+	if rd.maxHostsPerClient <= 0 {
+		return fmt.Errorf("max_hosts_per_client must be greater than 0")
 	}
 	if rd.maxCacheSize, err = strconv.Atoi(string(rd.MaxCacheSize)); err != nil {
 		return fmt.Errorf("invalid max_cache_size %q: %v", rd.MaxCacheSize, err)
 	}
-	if rd.maxTrackedClients, err = strconv.Atoi(string(rd.MaxClients)); err != nil {
-		return fmt.Errorf("invalid max_clients %q: %v", rd.MaxClients, err)
+	if rd.maxCacheSize <= 0 {
+		return fmt.Errorf("max_cache_size must be greater than 0")
+	}
+	if rd.maxTrackedClients, err = strconv.Atoi(string(rd.MaxTrackedClients)); err != nil {
+		return fmt.Errorf("invalid max_tracked_clients %q: %v", rd.MaxTrackedClients, err)
+	}
+	if rd.maxTrackedClients <= 0 {
+		return fmt.Errorf("max_tracked_clients must be greater than 0")
 	}
 
 	if len(rd.Resolvers) > 0 {
@@ -175,96 +253,20 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Duration("lookup_timeout", rd.lookupMax),
 			zap.Duration("cache_ttl", rd.lookupTTL),
 			zap.Int("max_cache_size", rd.maxCacheSize),
-			zap.Int("max_clients", rd.maxTrackedClients),
-			zap.Duration("unique_host_window", rd.uniqueHostWindow),
-			zap.Int("max_unique_hosts_per_client", rd.maxUniqueHostsPerClient),
+			zap.Int("max_tracked_clients", rd.maxTrackedClients),
+			zap.Duration("host_limit_window", rd.hostLimitWindow),
+			zap.Int("max_hosts_per_client", rd.maxHostsPerClient),
 			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
 			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
 		)
 	}
 
-	rd.startRateLimiterCleanup(ctx)
+	rd.startHostLimitCleanup(ctx)
 
 	return nil
 }
 
-// Validate implements caddy.Validator
-func (rd *RedirDns) Validate() error {
-	// Check if default target is supplied and is a valid absolute URL
-	if rd.DefaultTarget != "" && (!isValidAbsoluteURL(rd.DefaultTarget) || containsNonPrintableASCII(rd.DefaultTarget)) {
-		return fmt.Errorf("invalid absolute URL default_target '%s'", rd.DefaultTarget)
-	}
-	// Check if supplied DNS TXT record prefix is valid
-	if !txtPrefixRegex.MatchString(rd.DnsPrefix) {
-		return fmt.Errorf("invalid dns_prefix '%s'", rd.DnsPrefix)
-	}
-	// Check if supplied response status code is supported
-	statusCode, err := strconv.Atoi(string(rd.StatusCode))
-	if err != nil {
-		return fmt.Errorf("invalid status_code %q: %v", rd.StatusCode, err)
-	}
-	if !isSupportedStatusCode(statusCode) {
-		return fmt.Errorf("unsupported status_code %d", statusCode)
-	}
-	lookupTimeout, err := time.ParseDuration(rd.LookupTimeout)
-	if err != nil {
-		return fmt.Errorf("invalid lookup_timeout %q: %v", rd.LookupTimeout, err)
-	}
-	if lookupTimeout <= 0 {
-		return fmt.Errorf("lookup_timeout must be greater than 0")
-	}
-	if lookupTimeout > maxLookupTimeout {
-		return fmt.Errorf("lookup_timeout must not exceed %s", maxLookupTimeout)
-	}
-	cacheTTL, err := time.ParseDuration(rd.CacheTTL)
-	if err != nil {
-		return fmt.Errorf("invalid cache_ttl %q: %v", rd.CacheTTL, err)
-	}
-	if cacheTTL <= 0 {
-		return fmt.Errorf("cache_ttl must be greater than 0")
-	}
-	rateWindow, err := time.ParseDuration(rd.UniqueHostWindow)
-	if err != nil {
-		return fmt.Errorf("invalid unique_host_window %q: %v", rd.UniqueHostWindow, err)
-	}
-	if rateWindow <= 0 {
-		return fmt.Errorf("unique_host_window must be greater than 0")
-	}
-	maxHosts, err := strconv.Atoi(string(rd.MaxUniqueHostsPerClient))
-	if err != nil || maxHosts <= 0 {
-		return fmt.Errorf("max_unique_hosts_per_client must be greater than 0")
-	}
-	maxCacheSize, err := strconv.Atoi(string(rd.MaxCacheSize))
-	if err != nil || maxCacheSize <= 0 {
-		return fmt.Errorf("max_cache_size must be greater than 0")
-	}
-	maxClients, err := strconv.Atoi(string(rd.MaxClients))
-	if err != nil || maxClients <= 0 {
-		return fmt.Errorf("max_clients must be greater than 0")
-	}
-	for _, ns := range rd.Resolvers {
-		host, port, splitErr := net.SplitHostPort(ns)
-		if splitErr != nil {
-			// no port — entire value is the host; port validation below is skipped.
-			// In the normal Caddy lifecycle Provision runs first and normalises all
-			// bare addresses to host:port form, so this branch is only reachable when
-			// Validate is called directly (e.g. in tests) without a prior Provision.
-			host = ns
-			port = ""
-		}
-		if net.ParseIP(host) == nil && !isValidDNSHost(host) {
-			return fmt.Errorf("invalid resolver address %q", ns)
-		}
-		if port != "" {
-			p, err := strconv.Atoi(port)
-			if err != nil || p < 1 || p > 65535 {
-				return fmt.Errorf("invalid port in resolver address %q", ns)
-			}
-		}
-	}
-	return nil
-}
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -296,26 +298,26 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.CacheTTL = d.Val()
-			case "unique_host_window":
+			case "host_limit_window":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.UniqueHostWindow = d.Val()
-			case "max_unique_hosts_per_client":
+				rd.HostLimitWindow = d.Val()
+			case "max_hosts_per_client":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.MaxUniqueHostsPerClient = StringOrInt(d.Val())
+				rd.MaxHostsPerClient = StringOrInt(d.Val())
 			case "max_cache_size":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
 				rd.MaxCacheSize = StringOrInt(d.Val())
-			case "max_clients":
+			case "max_tracked_clients":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.MaxClients = StringOrInt(d.Val())
+				rd.MaxTrackedClients = StringOrInt(d.Val())
 			case "trusted_proxies":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -358,6 +360,5 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 // Interface guards
 var (
 	_ caddy.Provisioner     = (*RedirDns)(nil)
-	_ caddy.Validator       = (*RedirDns)(nil)
 	_ caddyfile.Unmarshaler = (*RedirDns)(nil)
 )

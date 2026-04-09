@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"strings"
 	"time"
 
@@ -210,4 +211,34 @@ func (rd *RedirDns) evictOneCacheEntry(now time.Time) {
 	if soonestKey != "" {
 		delete(rd.cache, soonestKey)
 	}
+}
+
+// classifyLookupError returns a short, log-safe string describing the category of a
+// DNS lookup error. Used to populate the "reason" field in debug log messages without
+// including raw error text that could contain resolver-supplied data.
+func classifyLookupError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, errNoTXTRecord) {
+		return "not_found"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		if dnsErr.IsNotFound {
+			return "nxdomain"
+		}
+		if dnsErr.IsTimeout {
+			return "timeout"
+		}
+		if dnsErr.IsTemporary {
+			return "temporary_dns_error"
+		}
+		return "dns_error"
+	}
+
+	return "lookup_error"
 }

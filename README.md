@@ -1,6 +1,6 @@
 # HTTP redirect module for Caddy Server 2
 
-This is comprehensive rewrite of the [argami/redir-dns](https://github.com/argami/redir-dns) module providing HTTP redirect functionality configured with TXT DNS records.  This allows domain owners manage host-level redirects entirely within DNS without requiring any changes to the Caddy Server configuration.  This module fixes a number of bugs in present in [argami/redir-dns](https://github.com/argami/redir-dns) and implements additional dynamic placeholder substitution functionality.
+This is a comprehensive rewrite of the [argami/redir-dns](https://github.com/argami/redir-dns) module providing HTTP redirect functionality configured with TXT DNS records.  This allows domain owners manage host-level redirects entirely within DNS without requiring any changes to the Caddy Server configuration.  This module fixes a number of bugs in present in [argami/redir-dns](https://github.com/argami/redir-dns) and implements additional dynamic placeholder substitution functionality.
 
 ### Installation
 
@@ -34,10 +34,10 @@ Several optional parameters are also supported:
 		cache_ttl                   30s
 		max_cache_size              10000
 
-		trusted_proxies             10.0.0.0/8 192.168.0.0/16
-		unique_host_window          1m
-		max_unique_hosts_per_client 50
-		max_clients                 100000
+		trusted_proxies    10.0.0.0/8 192.168.0.0/16
+		host_limit_window  1m
+		max_hosts_per_client 50
+		max_tracked_clients  100000
 
 		response_template           /etc/caddy/error.html
 		log_redirects
@@ -71,12 +71,12 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 * __cache_ttl__ specifies the minimum time that successful or failed DNS TXT lookup results are cached in memory. When the TXT record's own DNS TTL exceeds this value the record TTL is used instead, so entries are never served from cache longer than the upstream resolver intended.  Duration format must be valid for Go's `time.ParseDuration` (for example `30s`, `2m`).  Default value: `30s`.
 * __max_cache_size__ specifies the maximum number of DNS TXT lookup results held in the in-memory cache. When the limit is reached, the entry with the soonest expiry is evicted before inserting a new one.  Default value: `10000`.
 
-**Rate limiting**
+**DNS lookup guard**
 
 * __trusted_proxies__ specifies CIDRs or IP addresses that are allowed to provide the client IP via the `X-Forwarded-For` or `X-Real-IP` request headers.  `X-Forwarded-For` is checked first (walking right-to-left to find the rightmost non-trusted entry); `X-Real-IP` is used as a fallback (set by nginx and some other proxies).  If the direct peer is not trusted, both headers are ignored and the remote peer address is used instead.
-* __unique_host_window__ specifies the per-client sliding window used for unique-host tracking.  Duration format must be valid for Go's `time.ParseDuration` (for example `1m`, `30s`).  Default value: `1m`.
-* __max_unique_hosts_per_client__ specifies how many unique hostnames a single client may request within `unique_host_window` before further lookups are skipped.  When the limit is exceeded, requests fall back to `default_target` if configured; otherwise a `429 Too Many Requests` response is returned.  Default value: `50`.
-* __max_clients__ specifies the maximum number of per-client rate-limit entries tracked in memory. When the limit is reached, an existing entry is evicted to make room, preventing unbounded memory growth under rotating-IP traffic.  Default value: `100000`.
+* __host_limit_window__ specifies the per-client sliding window used to track how many distinct hostnames a client has triggered first-time DNS lookups for.  Duration format must be valid for Go's `time.ParseDuration` (for example `1m`, `30s`).  Default value: `1m`.
+* __max_hosts_per_client__ specifies how many distinct hostnames a single client may trigger first-time DNS lookups for within `host_limit_window`.  Repeat lookups for a hostname already seen within the window are always allowed and do not consume an additional slot.  When the limit is exceeded, requests fall back to `default_target` if configured; otherwise a `429 Too Many Requests` response is returned.  Default value: `50`.
+* __max_tracked_clients__ specifies the maximum number of per-client host-tracking entries held in memory. When the limit is reached, an existing entry is evicted to make room, preventing unbounded memory growth under rotating-IP traffic.  Default value: `100000`.
 
 **Response**
 

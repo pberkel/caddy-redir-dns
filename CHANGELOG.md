@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.0 — 2026-04-09
+
+### Changed
+- The per-client DNS lookup guard configuration directives have been renamed to more accurately describe what the feature does — it bounds how many *distinct hostnames* a single client can trigger first-time DNS lookups for, not how many requests it can make. Repeat lookups for a hostname already seen within the window are always free and do not consume a slot. The three affected directives and their JSON field names are:
+  - `unique_host_window` → `host_limit_window`
+  - `max_unique_hosts_per_client` → `max_hosts_per_client`
+  - `max_clients` → `max_tracked_clients`
+- Provisioned-module log fields updated to match the renamed directives: `max_clients` → `max_tracked_clients`, `unique_host_window` → `host_limit_window`, `max_unique_hosts_per_client` → `max_hosts_per_client`.
+- `Validate()` has been removed; all semantic validation is now performed inline in `Provision()` immediately after each field is parsed. The observable behaviour is unchanged — invalid configuration still prevents Caddy from starting — but all errors are now reported during the provision phase.
+
+### Fixed
+- When `X-Forwarded-For` exceeded the 1 024-byte inspection limit, the rightmost-kept portion could begin mid-address after truncation. The first (potentially partial) token is now discarded before the right-to-left walk begins, ensuring only complete IP strings are evaluated as client identifiers.
+- IP-address detection in `normalizeRequestHost` now uses `netip.ParseAddr` consistently with the rest of the module, replacing the legacy `net.ParseIP` call.
+
+---
+
 ## v1.2.1 — 2026-04-01
 
 ### Changed
