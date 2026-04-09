@@ -66,15 +66,16 @@ func init() {
 func New() *RedirDns {
 	rd := RedirDns{
 		DnsPrefix:               defaultDnsPrefix,
-		StatusCode:              StringOrInt(strconv.Itoa(defaultStatusCode)),
+		StatusCode:              "temporary",
 		LookupTimeout:           defaultDnsLookupTimeout.String(),
 		CacheTTL:                defaultDnsCacheTTL.String(),
 		HostLimitWindow:   defaultHostLimitWindow.String(),
 		MaxHostsPerClient: StringOrInt(strconv.Itoa(defaultMaxHostsPerClient)),
 		MaxCacheSize:      StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
 		MaxTrackedClients: StringOrInt(strconv.Itoa(defaultMaxTrackedClients)),
-		resolver:          net.DefaultResolver,
-		statusCode:        defaultStatusCode,
+		resolver:            net.DefaultResolver,
+		statusCodeAuto:      true,
+		statusCodePermanent: false,
 		lookupTTL:         defaultDnsCacheTTL,
 		lookupMax:         defaultDnsLookupTimeout,
 		cache:             make(map[string]dnsCacheEntry),
@@ -185,11 +186,19 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	}
 
 	// parse and validate int fields
-	if rd.statusCode, err = strconv.Atoi(string(rd.StatusCode)); err != nil {
-		return fmt.Errorf("invalid status_code %q: %v", rd.StatusCode, err)
-	}
-	if !isSupportedStatusCode(rd.statusCode) {
-		return fmt.Errorf("unsupported status_code %d", rd.statusCode)
+	switch string(rd.StatusCode) {
+	case "temporary":
+		rd.statusCodeAuto, rd.statusCodePermanent = true, false
+	case "permanent":
+		rd.statusCodeAuto, rd.statusCodePermanent = true, true
+	default:
+		if rd.statusCode, err = strconv.Atoi(string(rd.StatusCode)); err != nil {
+			return fmt.Errorf("invalid status_code %q: must be a numeric code (301/302/303/307/308) or \"temporary\"/\"permanent\"", rd.StatusCode)
+		}
+		if !isSupportedStatusCode(rd.statusCode) {
+			return fmt.Errorf("unsupported status_code %d", rd.statusCode)
+		}
+		rd.statusCodeAuto = false
 	}
 	if rd.maxHostsPerClient, err = strconv.Atoi(string(rd.MaxHostsPerClient)); err != nil {
 		return fmt.Errorf("invalid max_hosts_per_client %q: %v", rd.MaxHostsPerClient, err)
@@ -249,7 +258,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		c.Write(
 			zap.String("default_target", rd.DefaultTarget),
 			zap.String("dns_prefix", rd.DnsPrefix),
-			zap.Int("status_code", rd.statusCode),
+			zap.String("status_code", string(rd.StatusCode)),
 			zap.Duration("lookup_timeout", rd.lookupMax),
 			zap.Duration("cache_ttl", rd.lookupTTL),
 			zap.Int("max_cache_size", rd.maxCacheSize),

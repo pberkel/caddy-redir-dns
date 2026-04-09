@@ -2,12 +2,16 @@
 
 ## v1.3.0 — 2026-04-09
 
+### Added
+- `status_code` now accepts the keywords `temporary` and `permanent` in addition to numeric codes. Keywords select the method-appropriate redirect code at request time: `temporary` emits `302` for `GET`/`HEAD` and `307` for all other methods; `permanent` emits `301` for `GET`/`HEAD` and `308` for all other methods. This ensures that `POST`, `PUT`, and `DELETE` requests are redirected with method-preserving codes without any operator intervention. Numeric codes (`301`, `302`, `303`, `307`, `308`) continue to emit that exact code regardless of request method. The same keyword logic applies when a TXT record specifies `permanent` or `temporary` as its status token.
+- The module-level default for `status_code` has changed from the numeric `302` to the keyword `temporary`, so the method-aware selection is active by default. `GET` and `HEAD` traffic is unaffected (still receives `302`); `POST`, `PUT`, `DELETE`, and other non-safe methods now receive `307` instead of `302` unless an explicit numeric code is configured.
+
 ### Changed
 - The per-client DNS lookup guard configuration directives have been renamed to more accurately describe what the feature does — it bounds how many *distinct hostnames* a single client can trigger first-time DNS lookups for, not how many requests it can make. Repeat lookups for a hostname already seen within the window are always free and do not consume a slot. The three affected directives and their JSON field names are:
   - `unique_host_window` → `host_limit_window`
   - `max_unique_hosts_per_client` → `max_hosts_per_client`
   - `max_clients` → `max_tracked_clients`
-- Provisioned-module log fields updated to match the renamed directives: `max_clients` → `max_tracked_clients`, `unique_host_window` → `host_limit_window`, `max_unique_hosts_per_client` → `max_hosts_per_client`.
+- Provisioned-module log fields updated to match the renamed directives: `max_clients` → `max_tracked_clients`, `unique_host_window` → `host_limit_window`, `max_unique_hosts_per_client` → `max_hosts_per_client`. The `status_code` log field now emits the configured string value (e.g. `"temporary"`) rather than the resolved integer.
 - `Validate()` has been removed; all semantic validation is now performed inline in `Provision()` immediately after each field is parsed. The observable behaviour is unchanged — invalid configuration still prevents Caddy from starting — but all errors are now reported during the provision phase.
 
 ### Fixed

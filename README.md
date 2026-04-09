@@ -25,9 +25,9 @@ Several optional parameters are also supported:
 ```caddyfile
 :80 {
 	redir_dns {
-		default_target              "https://www.example.com"
-		status_code                 302
-		dns_prefix                  "_redirdns"
+		default_target              https://www.example.com
+		status_code                 temporary
+		dns_prefix                  _redirdns
 
 		resolvers                   1.1.1.1 8.8.8.8
 		lookup_timeout              2s
@@ -61,7 +61,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 **Redirect**
 
 * __default_target__ specifies a redirect URL that will be used if the module is unable to determine an appropriate redirect location (i.e. the hostname is an IP address, the TXT record doesn't exist or is invalid).  If this parameter is not set and an error occurs during redirect processing, a simple 404 response will be returned.
-* __status_code__ specifies the numeric HTTP response code used in the redirect. Allowed values are `301`, `302`, `303`, `307`, and `308`. Default value: `302`.
+* __status_code__ specifies the HTTP redirect status to use. Accepts a numeric code (`301`, `302`, `303`, `307`, `308`) or the keywords `temporary` or `permanent`. Keywords select the method-appropriate code automatically: `temporary` emits `302` for `GET`/`HEAD` and `307` for all other methods; `permanent` emits `301` for `GET`/`HEAD` and `308` for all other methods. This ensures that `POST`, `PUT`, and `DELETE` requests are redirected with method-preserving codes without any additional configuration. Numeric codes always emit that exact code regardless of request method. Default value: `temporary`.
 * __dns_prefix__ specifies the prefix used to construct the TXT DNS record name where redirect information for a given host is stored in the format `<dns_prefix>.<host>`.  Default value: `"_redirdns"`.
 
 **DNS lookup**
@@ -108,7 +108,7 @@ _redirdns.mail.example.com. IN TXT "https://www.redirect-target.com/mail/ 301"
 _redirdns.blog.example.com. IN TXT "https://www.redirect-target.com/blog/ 308"
 ```
 
-It is also possible to specify textual response status representations as allowed by Caddy Server:
+It is also possible to use the keywords `permanent` and `temporary` instead of a numeric code.  Unlike numeric codes, keywords select the method-appropriate code automatically at request time: `temporary` emits `302` for `GET`/`HEAD` and `307` for all other methods; `permanent` emits `301` for `GET`/`HEAD` and `308` for all other methods.  Using keywords is preferred over numeric `301`/`302` codes because they correctly preserve the request method and body for `POST`, `PUT`, and `DELETE` redirects without any extra configuration.
 
 ```
 _redirdns.one.example.com. IN TXT "https://www.redirect-target.com permanent"

@@ -24,9 +24,6 @@ const (
 	// Default DNS TXT record prefix
 	defaultDnsPrefix = "_redirdns"
 
-	// Default HTTP response status code
-	defaultStatusCode = 302
-
 	// Default HTTP response template (minified; canonical source: examples/error_template.html)
 	defaultResponseTemplate = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>{{.Title}}</title><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#4f8ef7;--warn:#f5c842}body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 2rem;height:56px;display:flex;align-items:center;gap:2rem}.logo{font-size:1.1rem;font-weight:700;color:var(--accent);letter-spacing:-0.01em}nav{display:flex;gap:1.5rem;margin-left:auto}nav a{color:var(--muted);text-decoration:none;font-size:0.875rem;transition:color 0.15s}nav a:hover{color:var(--text)}main{flex:1;display:flex;align-items:flex-start;justify-content:center;padding:6rem 1.5rem 4rem}.card{width:100%;max-width:640px}.badge{display:inline-block;font-size:0.7rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:0.2rem 0.55rem;margin-bottom:1rem}h1{font-size:1.6rem;font-weight:600;margin-bottom:2rem;line-height:1.3}section{margin-bottom:1.5rem}h2{font-size:0.7rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);margin-bottom:0.5rem}.detail{font-family:ui-monospace,"Cascadia Code",monospace;font-size:0.875rem;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--warn);border-radius:0 6px 6px 0;padding:0.75rem 1rem;color:var(--text);word-break:break-word}.resolution{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:0.75rem 1rem;font-size:0.9rem;line-height:1.65;color:var(--muted)}footer{background:var(--surface);border-top:1px solid var(--border);padding:0 2rem;height:48px;display:flex;align-items:center;justify-content:center;font-size:0.8rem;color:var(--muted)}footer a{color:var(--muted);text-decoration:none;transition:color 0.15s}footer a:hover{color:var(--text)}</style></head><body><header><span class="logo">caddy-redir-dns</span><nav><a href="https://github.com/pberkel/caddy-redir-dns#configuration">Documentation</a><a href="https://github.com/pberkel/caddy-redir-dns">GitHub</a></nav></header><main><div class="card"><div class="badge">Error</div><h1>{{.Title}}</h1><section><h2>What happened</h2><div class="detail">{{.Detail}}</div></section><section><h2>How to resolve</h2><div class="resolution">{{.Resolution}}</div></section></div></main><footer><span>Powered by <a href="https://caddyserver.com">Caddy</a> and <a href="https://github.com/pberkel/caddy-redir-dns">caddy-redir-dns</a></span></footer></body></html>`
 )
@@ -37,8 +34,13 @@ type RedirDns struct {
 
 	// The target URL to redirect when an error occurs. Default: none
 	DefaultTarget string `json:"default_target,omitempty"`
-	// The HTTP status code returned by the redirect response. Default: 302
-	// Accepts a bare integer (302) or a quoted string ("{env.STATUS_CODE}").
+	// The HTTP redirect status to use. Accepts a numeric code (301, 302, 303, 307, 308)
+	// or the keywords "temporary" or "permanent". Keywords select the method-appropriate
+	// code automatically: "temporary" emits 302 for GET/HEAD and 307 for all other methods;
+	// "permanent" emits 301 for GET/HEAD and 308 for all other methods. Numeric codes always
+	// emit that exact code regardless of the request method. Keyword forms are preferred
+	// because they preserve request bodies on non-GET redirects without operator intervention.
+	// Accepts a bare integer or a quoted string (e.g. "{env.STATUS_CODE}"). Default: "temporary".
 	StatusCode StringOrInt `json:"status_code,omitempty"`
 	// DNS TXT record prefix where the redirect information is stored. Default: "_redirdns"
 	DnsPrefix string `json:"dns_prefix,omitempty"`
@@ -95,7 +97,9 @@ type RedirDns struct {
 	logger      *zap.Logger
 
 	// redirect
-	statusCode int
+	statusCode         int  // explicit numeric code; only used when !statusCodeAuto
+	statusCodeAuto     bool // true: pick 302/307 or 301/308 based on request method
+	statusCodePermanent bool // when auto: true → 301/308 pair, false → 302/307 pair
 	replacer   *strings.Replacer // shorthand → expanded placeholder pre-processor
 
 	// DNS lookup
@@ -303,11 +307,11 @@ func (rd *RedirDns) redirectToDefault(w http.ResponseWriter, r *http.Request, cl
 				zap.String("host", host),
 				zap.String("uri", r.RequestURI),
 				zap.String("target", rd.DefaultTarget),
-				zap.Int("status", rd.statusCode),
+				zap.Int("status", rd.resolveStatusCode(r.Method)),
 			)
 		}
 	}
-	return true, writeRedirectResponse(w, rd.statusCode, rd.DefaultTarget)
+	return true, writeRedirectResponse(w, rd.resolveStatusCode(r.Method), rd.DefaultTarget)
 }
 
 // writeRedirectResponse writes a redirect response with the given status code and Location header.
@@ -337,6 +341,34 @@ func (rd *RedirDns) writeHtmlResponse(w http.ResponseWriter, statusCode int, tit
 		Detail:     detail,
 		Resolution: resolution,
 	})
+}
+
+// resolveStatusCode returns the HTTP redirect status code to use for a request with the
+// given method. When statusCodeAuto is true, autoStatusCode selects the method-appropriate
+// code; otherwise the fixed statusCode configured by the operator is returned.
+func (rd *RedirDns) resolveStatusCode(method string) int {
+	if rd.statusCodeAuto {
+		return autoStatusCode(rd.statusCodePermanent, method)
+	}
+	return rd.statusCode
+}
+
+// autoStatusCode selects the method-appropriate redirect status from the 302/307
+// (temporary) or 301/308 (permanent) pair. GET and HEAD use the non-method-preserving
+// codes (301/302) because the method does not change in practice; all other methods use
+// the method-preserving codes (307/308) to prevent the request body from being silently
+// discarded by the client.
+func autoStatusCode(permanent bool, method string) int {
+	if method != http.MethodGet && method != http.MethodHead {
+		if permanent {
+			return 308
+		}
+		return 307
+	}
+	if permanent {
+		return 301
+	}
+	return 302
 }
 
 // parseTxtRecord parses a single DNS TXT record value into a redirect target URL and
@@ -404,7 +436,8 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 	}
 
 	targetUrl := ""
-	statusCode := rd.statusCode
+	// start from the module-level default, applying method-based selection when configured
+	statusCode := rd.resolveStatusCode(r.Method)
 
 	// split the expanded record on whitespace; format is: "<url> [<status>]"
 	parts := strings.Fields(replaced)
@@ -424,9 +457,11 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 	if len(parts) > 1 {
 		switch parts[1] {
 		case "permanent":
-			statusCode = 301
+			// select 301 for GET/HEAD, 308 for all other methods
+			statusCode = autoStatusCode(true, r.Method)
 		case "temporary":
-			statusCode = 302
+			// select 302 for GET/HEAD, 307 for all other methods
+			statusCode = autoStatusCode(false, r.Method)
 		default:
 			code, err := strconv.Atoi(parts[1])
 			if err == nil && isSupportedStatusCode(code) {

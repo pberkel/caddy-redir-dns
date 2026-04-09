@@ -223,8 +223,8 @@ func TestServeHTTPInvalidHostWithDefaultTargetRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServeHTTP returned error: %v", err)
 	}
-	if rr.Code != rd.statusCode {
-		t.Fatalf("status code = %d, want %d", rr.Code, rd.statusCode)
+	if rr.Code != rd.resolveStatusCode(req.Method) {
+		t.Fatalf("status code = %d, want %d", rr.Code, rd.resolveStatusCode(req.Method))
 	}
 	if got := rr.Header().Get("Location"); got != rd.DefaultTarget {
 		t.Fatalf("Location = %q, want %q", got, rd.DefaultTarget)
@@ -250,8 +250,8 @@ func TestServeHTTPLookupTimeoutFallsBackToDefaultTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServeHTTP returned error: %v", err)
 	}
-	if rr.Code != rd.statusCode {
-		t.Fatalf("status code = %d, want %d", rr.Code, rd.statusCode)
+	if rr.Code != rd.resolveStatusCode(req.Method) {
+		t.Fatalf("status code = %d, want %d", rr.Code, rd.resolveStatusCode(req.Method))
 	}
 	if got := rr.Header().Get("Location"); got != rd.DefaultTarget {
 		t.Fatalf("Location = %q, want %q", got, rd.DefaultTarget)
@@ -402,6 +402,135 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("lookup function called %d times after window reset, want 2", calls.Load())
+	}
+}
+
+func TestAutoStatusCode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		permanent bool
+		method    string
+		want      int
+	}{
+		// "temporary" keyword: GET/HEAD → 302, everything else → 307
+		{false, http.MethodGet, 302},
+		{false, http.MethodHead, 302},
+		{false, http.MethodPost, 307},
+		{false, http.MethodPut, 307},
+		{false, http.MethodDelete, 307},
+		{false, http.MethodPatch, 307},
+		// "permanent" keyword: GET/HEAD → 301, everything else → 308
+		{true, http.MethodGet, 301},
+		{true, http.MethodHead, 301},
+		{true, http.MethodPost, 308},
+		{true, http.MethodPut, 308},
+		{true, http.MethodDelete, 308},
+		{true, http.MethodPatch, 308},
+	}
+	for _, tc := range cases {
+		got := autoStatusCode(tc.permanent, tc.method)
+		if got != tc.want {
+			t.Errorf("autoStatusCode(permanent=%v, method=%q) = %d, want %d",
+				tc.permanent, tc.method, got, tc.want)
+		}
+	}
+}
+
+func TestServeHTTPMethodAwareStatusCodeForKeywords(t *testing.T) {
+	t.Parallel()
+
+	// table: TXT status token → expected code per method
+	cases := []struct {
+		token  string
+		method string
+		want   int
+	}{
+		{"temporary", http.MethodGet, 302},
+		{"temporary", http.MethodHead, 302},
+		{"temporary", http.MethodPost, 307},
+		{"permanent", http.MethodGet, 301},
+		{"permanent", http.MethodHead, 301},
+		{"permanent", http.MethodPost, 308},
+		// numeric codes bypass smart selection entirely
+		{"302", http.MethodPost, 302},
+		{"301", http.MethodPost, 301},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.token+"/"+tc.method, func(t *testing.T) {
+			t.Parallel()
+			rd := newTestRedirDns(t)
+			rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+				return []string{"https://target.example/ " + tc.token}, 0, nil
+			}
+			req := httptest.NewRequest(tc.method, "http://example.com/", nil)
+			req.Host = "www.example.com"
+			rr := httptest.NewRecorder()
+			if err := rd.ServeHTTP(rr, req, nil); err != nil {
+				t.Fatalf("ServeHTTP returned error: %v", err)
+			}
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rr.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestServeHTTPDefaultStatusCodeIsMethodAware(t *testing.T) {
+	t.Parallel()
+
+	// default (no status token in TXT record, no status_code config) should
+	// behave like "temporary": 302 for GET/HEAD, 307 for POST/PUT/DELETE
+	cases := []struct {
+		method string
+		want   int
+	}{
+		{http.MethodGet, 302},
+		{http.MethodHead, 302},
+		{http.MethodPost, 307},
+		{http.MethodPut, 307},
+		{http.MethodDelete, 307},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.method, func(t *testing.T) {
+			t.Parallel()
+			rd := newTestRedirDns(t)
+			rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+				return []string{"https://target.example/"}, 0, nil // no status token
+			}
+			req := httptest.NewRequest(tc.method, "http://example.com/", nil)
+			req.Host = "www.example.com"
+			rr := httptest.NewRecorder()
+			if err := rd.ServeHTTP(rr, req, nil); err != nil {
+				t.Fatalf("ServeHTTP returned error: %v", err)
+			}
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rr.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestServeHTTPExplicitNumericStatusCodeIgnoresMethod(t *testing.T) {
+	t.Parallel()
+
+	// status_code 302 (explicit numeric) must always emit 302, even for POST
+	rd := newTestRedirDns(t)
+	rd.statusCode = 302
+	rd.statusCodeAuto = false
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return []string{"https://target.example/"}, 0, nil
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", nil)
+	req.Host = "www.example.com"
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != 302 {
+		t.Fatalf("status = %d, want 302", rr.Code)
 	}
 }
 
