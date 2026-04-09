@@ -44,11 +44,12 @@ type dnsCacheEntry struct {
 // lookupTXT returns the DNS TXT records for query, serving from the in-memory cache
 // when a fresh entry exists. Concurrent requests for the same query are coalesced by
 // singleflight so that only one upstream DNS lookup is issued regardless of how many
-// requests arrive simultaneously.
-func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
+// requests arrive simultaneously. The returned bool is true when the result was served
+// directly from the outer cache (i.e. no upstream lookup was triggered by this call).
+func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 	now := time.Now()
 	if txt, err, found := rd.cachedLookup(query, now); found {
-		return txt, err
+		return txt, err, true
 	}
 
 	value, _, _ := rd.lookupGroup.Do(query, func() (any, error) {
@@ -100,7 +101,20 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error) {
 	// to an unexpected panic in a concurrent caller), entry is the zero dnsCacheEntry
 	// which is treated as a cache miss rather than crashing the server
 	entry, _ := value.(dnsCacheEntry)
-	return append([]string(nil), entry.txt...), entry.err
+	return append([]string(nil), entry.txt...), entry.err, false
+}
+
+// remainingCacheTTL returns the time until the cached entry for query expires.
+// Returns (0, false) when no live entry exists in the cache.
+func (rd *RedirDns) remainingCacheTTL(query string) (time.Duration, bool) {
+	now := time.Now()
+	rd.cacheMu.RLock()
+	entry, ok := rd.cache[query]
+	rd.cacheMu.RUnlock()
+	if !ok || now.After(entry.expiresAt) {
+		return 0, false
+	}
+	return entry.expiresAt.Sub(now), true
 }
 
 // cachedLookup returns the cached TXT records for query if a non-expired entry exists.

@@ -679,3 +679,228 @@ func newTestRedirDns(t *testing.T) *RedirDns {
 	rd.cache = make(map[string]dnsCacheEntry)
 	return rd
 }
+
+// newDebugRedirDns returns a RedirDns with debug_headers configured.
+func newDebugRedirDns(t *testing.T, key string) *RedirDns {
+	t.Helper()
+	rd := newTestRedirDns(t)
+	rd.debugKey = []byte(key)
+	return rd
+}
+
+// makeDebugReq builds a GET request with the given host and an X-Debug-Key header.
+func makeDebugReq(host, key string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "http://"+host+"/path?q=1", nil)
+	req.Host = host
+	if key != "" {
+		req.Header.Set("X-Debug-Key", key)
+	}
+	return req
+}
+
+func TestDebugHeadersInactiveWhenNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t) // no debugKey set
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return []string{"https://target.example/"}, 0, nil
+	}
+	req := makeDebugReq("www.example.com", "anykey")
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Host"); h != "" {
+		t.Fatalf("expected no debug headers when debug_headers not configured, got X-Redir-Dns-Host=%q", h)
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "" {
+		t.Fatalf("expected no debug headers when debug_headers not configured, got X-Redir-Dns-Reason=%q", h)
+	}
+}
+
+func TestDebugHeadersInactiveOnWrongKey(t *testing.T) {
+	t.Parallel()
+
+	rd := newDebugRedirDns(t, "secret")
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return []string{"https://target.example/"}, 0, nil
+	}
+	req := makeDebugReq("www.example.com", "wrongkey")
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "" {
+		t.Fatalf("expected no debug headers on key mismatch, got X-Redir-Dns-Reason=%q", h)
+	}
+}
+
+func TestDebugHeadersOnSuccessfulRedirect(t *testing.T) {
+	t.Parallel()
+
+	const key = "testkey"
+	rd := newDebugRedirDns(t, key)
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return []string{"https://target.example/", "https://other.example/"}, 5 * time.Second, nil
+	}
+	req := makeDebugReq("www.example.com", key)
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rr.Code)
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Host"); h != "www.example.com" {
+		t.Fatalf("X-Redir-Dns-Host = %q, want %q", h, "www.example.com")
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Query"); h != "_redirdns.www.example.com" {
+		t.Fatalf("X-Redir-Dns-Query = %q, want %q", h, "_redirdns.www.example.com")
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "redirect" {
+		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "redirect")
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Cached"); h != "false" {
+		t.Fatalf("X-Redir-Dns-Cached = %q, want %q", h, "false")
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Cache-Ttl"); h == "" {
+		t.Fatal("X-Redir-Dns-Cache-Ttl should be present after lookup")
+	}
+	records := rr.Header().Values("X-Redir-Dns-Record")
+	if len(records) != 2 {
+		t.Fatalf("X-Redir-Dns-Record count = %d, want 2", len(records))
+	}
+}
+
+func TestDebugHeadersCacheHitOnSecondRequest(t *testing.T) {
+	t.Parallel()
+
+	const key = "testkey"
+	rd := newDebugRedirDns(t, key)
+	calls := 0
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		calls++
+		return []string{"https://target.example/"}, 30 * time.Second, nil
+	}
+
+	// first request — populates cache
+	rr1 := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr1, makeDebugReq("www.example.com", key), nil); err != nil {
+		t.Fatalf("first ServeHTTP returned error: %v", err)
+	}
+	if h := rr1.Header().Get("X-Redir-Dns-Cached"); h != "false" {
+		t.Fatalf("first request: X-Redir-Dns-Cached = %q, want %q", h, "false")
+	}
+
+	// second request — should be served from cache
+	rr2 := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr2, makeDebugReq("www.example.com", key), nil); err != nil {
+		t.Fatalf("second ServeHTTP returned error: %v", err)
+	}
+	if h := rr2.Header().Get("X-Redir-Dns-Cached"); h != "true" {
+		t.Fatalf("second request: X-Redir-Dns-Cached = %q, want %q", h, "true")
+	}
+	if calls != 1 {
+		t.Fatalf("lookup called %d times, want 1 (cache should have been used for second request)", calls)
+	}
+}
+
+func TestDebugHeadersOnInvalidHost(t *testing.T) {
+	t.Parallel()
+
+	const key = "testkey"
+	rd := newDebugRedirDns(t, key)
+	// IP address in Host header — will fail normalizeRequestHost
+	req := makeDebugReq("192.168.1.1", key)
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "invalid_host" {
+		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "invalid_host")
+	}
+	// no query or record headers expected since lookup was never attempted
+	if h := rr.Header().Get("X-Redir-Dns-Query"); h != "" {
+		t.Fatalf("X-Redir-Dns-Query should be absent for invalid_host, got %q", h)
+	}
+}
+
+func TestDebugHeadersOnDNSLookupFailed(t *testing.T) {
+	t.Parallel()
+
+	const key = "testkey"
+	rd := newDebugRedirDns(t, key)
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return nil, 0, errNoTXTRecord
+	}
+	req := makeDebugReq("www.example.com", key)
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "dns_lookup_failed" {
+		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "dns_lookup_failed")
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Cached"); h != "false" {
+		t.Fatalf("X-Redir-Dns-Cached = %q, want %q", h, "false")
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Query"); h != "_redirdns.www.example.com" {
+		t.Fatalf("X-Redir-Dns-Query = %q, want %q", h, "_redirdns.www.example.com")
+	}
+}
+
+func TestDebugHeadersOnNoValidTxtRecord(t *testing.T) {
+	t.Parallel()
+
+	const key = "testkey"
+	rd := newDebugRedirDns(t, key)
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		// record contains an invalid URL — parseTxtRecord will reject it
+		return []string{"not-a-valid-url"}, 0, nil
+	}
+	req := makeDebugReq("www.example.com", key)
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "no_valid_txt_record" {
+		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "no_valid_txt_record")
+	}
+	records := rr.Header().Values("X-Redir-Dns-Record")
+	if len(records) != 1 || records[0] != "not-a-valid-url" {
+		t.Fatalf("X-Redir-Dns-Record = %v, want [not-a-valid-url]", records)
+	}
+}
+
+func TestDebugHeadersDefaultTargetFallbackPreservesReason(t *testing.T) {
+	t.Parallel()
+
+	const key = "testkey"
+	rd := newDebugRedirDns(t, key)
+	rd.DefaultTarget = "https://default.example/"
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return nil, 0, errNoTXTRecord
+	}
+	req := makeDebugReq("www.example.com", key)
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	// default_target redirect was served
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rr.Code)
+	}
+	// reason should still reflect why the fallback was triggered
+	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "dns_lookup_failed" {
+		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "dns_lookup_failed")
+	}
+}

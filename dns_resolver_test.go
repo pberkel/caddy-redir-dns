@@ -25,19 +25,25 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 		return nil, 0, errors.New("unexpected second call for cached success")
 	}
 
-	txt, err := rd.lookupTXT("_redirdns.example.com")
+	txt, err, cached := rd.lookupTXT("_redirdns.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error on first lookup: %v", err)
 	}
 	if len(txt) != 1 || txt[0] != "https://example.com" {
 		t.Fatalf("unexpected TXT result: %#v", txt)
 	}
-	txt, err = rd.lookupTXT("_redirdns.example.com")
+	if cached {
+		t.Fatal("first lookup should not be a cache hit")
+	}
+	txt, err, cached = rd.lookupTXT("_redirdns.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error on cached lookup: %v", err)
 	}
 	if len(txt) != 1 || txt[0] != "https://example.com" {
 		t.Fatalf("unexpected cached TXT result: %#v", txt)
+	}
+	if !cached {
+		t.Fatal("second lookup should be a cache hit")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("lookup function called %d times, want 1", calls.Load())
@@ -53,11 +59,11 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 		return nil, 0, errNoTXTRecord
 	}
 
-	_, err = rdErr.lookupTXT("_redirdns.missing.example.com")
+	_, err, _ = rdErr.lookupTXT("_redirdns.missing.example.com")
 	if !errors.Is(err, errNoTXTRecord) {
 		t.Fatalf("expected errNoTXTRecord, got %v", err)
 	}
-	_, err = rdErr.lookupTXT("_redirdns.missing.example.com")
+	_, err, _ = rdErr.lookupTXT("_redirdns.missing.example.com")
 	if !errors.Is(err, errNoTXTRecord) {
 		t.Fatalf("expected cached errNoTXTRecord, got %v", err)
 	}
@@ -92,7 +98,7 @@ func TestLookupTXTSingleflightDedupesConcurrentCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			txt, err := rd.lookupTXT("_redirdns.concurrent.example.com")
+			txt, err, _ := rd.lookupTXT("_redirdns.concurrent.example.com")
 			if err != nil {
 				results <- err
 				return
@@ -136,7 +142,7 @@ func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
 		"_redirdns.five.example.com",
 	}
 	for _, q := range queries {
-		if _, err := rd.lookupTXT(q); err != nil {
+		if _, err, _ := rd.lookupTXT(q); err != nil {
 			t.Fatalf("lookupTXT(%q) returned error: %v", q, err)
 		}
 	}

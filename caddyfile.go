@@ -153,6 +153,10 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		rd.Resolvers[i] = ns
 	}
 	rd.ResponseTemplate = repl.ReplaceAll(rd.ResponseTemplate, "")
+	rd.DebugHeaders = repl.ReplaceAll(rd.DebugHeaders, "")
+	if rd.DebugHeaders != "" {
+		rd.debugKey = []byte(rd.DebugHeaders)
+	}
 
 	// validate fields whose constraints cannot be expressed as parse errors
 	if rd.DefaultTarget != "" && (!isValidAbsoluteURL(rd.DefaultTarget) || containsNonPrintableASCII(rd.DefaultTarget)) {
@@ -270,6 +274,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
 			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
+			zap.Bool("debug_headers", len(rd.debugKey) > 0),
 		)
 	}
 
@@ -352,6 +357,11 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				rd.ResponseTemplate = d.Val()
 			case "log_redirects":
 				rd.LogRedirects = true
+			case "debug_headers":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.DebugHeaders = d.Val()
 			default:
 				return d.Errf("unrecognized configuration option %q", d.Val())
 			}

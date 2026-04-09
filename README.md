@@ -41,6 +41,7 @@ Several optional parameters are also supported:
 
 		response_template           /etc/caddy/error.html
 		log_redirects
+		debug_headers               my-secret-key
 	}
 }
 ```
@@ -87,6 +88,15 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 
 * __response_template__ overrides the built-in HTML error page with a custom [Go html/template](https://pkg.go.dev/html/template). The value is resolved at provision time as follows: if the value refers to a readable file that path, the file content is used as the template; if no file exists at that path, the value itself is used as an inline template string; any other file error (e.g. permission denied) is treated as a hard failure. The template has access to three fields: `.Title` (short error label), `.Detail` (what went wrong), and `.Resolution` (how to fix it). Accepts a Caddy global placeholder (e.g. `{env.TEMPLATE_PATH}`). See `examples/error_template.html` for a reference implementation.
 * __log_redirects__ enables structured info-level logging of every request handled by the module. When enabled, successful redirects are logged with message `redirect` and error responses with message `redirect error`. Each entry includes the fields `client` (IP address), `method`, `host`, `uri`, `status`, `target` (redirects only), and `reason` (errors only). Logging is disabled by default.
+* __debug_headers__ enables diagnostic response headers for requests that present the correct key. When configured, any request that includes the `X-Debug-Key: <key>` request header with a value matching the configured key receives the following response headers describing the DNS lookup outcome:
+  * `X-Redir-Dns-Host` — the normalised hostname extracted from the request (always present when a valid hostname was found).
+  * `X-Redir-Dns-Query` — the DNS TXT query name used for the lookup (e.g. `_redirdns.www.example.com`). Absent when no lookup was attempted (invalid host, rate-limited).
+  * `X-Redir-Dns-Record` — the raw TXT record value(s) returned by the resolver. One header line per record. Absent when the lookup returned no records.
+  * `X-Redir-Dns-Cached` — `true` when the response was served from the in-memory cache without a new upstream lookup; `false` when a fresh lookup was performed.
+  * `X-Redir-Dns-Cache-Ttl` — the remaining time until the cache entry expires (e.g. `28.5s`). Present whenever a cache entry exists after the lookup.
+  * `X-Redir-Dns-Reason` — the request outcome: `redirect`, `invalid_host`, `rate_limited`, `dns_lookup_failed`, or `no_valid_txt_record`.
+
+  The configured key is compared using a constant-time comparison to prevent timing-based key enumeration. Accepts a Caddy global placeholder (e.g. `{env.DEBUG_KEY}`). Debug headers are disabled by default.
 
 ### Usage
 

@@ -2,6 +2,7 @@ package redirdns
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -114,17 +115,23 @@ type RedirDns struct {
 	// successful redirects log as "redirect"; error responses log as "redirect error"
 	// with a reason field. Default: false.
 	LogRedirects bool `json:"log_redirects,omitempty"`
+	// Opt-in debug key: when non-empty, requests carrying an X-Debug-Key request header
+	// whose value matches this string receive diagnostic response headers describing the
+	// DNS lookup outcome. The key is compared using a constant-time comparison to avoid
+	// timing-based key enumeration. Accepts a Caddy global placeholder (e.g. "{env.DEBUG_KEY}").
+	DebugHeaders string `json:"debug_headers,omitempty"`
 
 	// response rendering
 	responseTpl *template.Template
 	logger      *zap.Logger
+	debugKey    []byte // compiled from DebugHeaders at provision time; nil when disabled
 
 	// redirect
-	statusCode          int  // explicit numeric code; only used when !statusCodeAuto && !statusCodeHTML
-	statusCodeAuto      bool // true: pick 302/307 or 301/308 based on request method
-	statusCodePermanent bool // when auto: true → 301/308 pair, false → 302/307 pair
-	statusCodeHTML      bool // true: 200 OK with HTML meta-refresh/JS redirect body
-	replacer   *strings.Replacer // shorthand → expanded placeholder pre-processor
+	statusCode          int               // explicit numeric code; only used when !statusCodeAuto && !statusCodeHTML
+	statusCodeAuto      bool              // true: pick 302/307 or 301/308 based on request method
+	statusCodePermanent bool              // when auto: true → 301/308 pair, false → 302/307 pair
+	statusCodeHTML      bool              // true: 200 OK with HTML meta-refresh/JS redirect body
+	replacer            *strings.Replacer // shorthand → expanded placeholder pre-processor
 
 	// DNS lookup
 	resolver     *net.Resolver
@@ -137,12 +144,12 @@ type RedirDns struct {
 	lookupGroup  singleflight.Group
 
 	// DNS lookup guard
-	hostLimitMu         sync.Mutex
-	hostTrackers        map[string]*hostTracker
-	maxTrackedClients   int
-	hostLimitWindow     time.Duration
-	maxHostsPerClient   int
-	trustedNets         []netip.Prefix
+	hostLimitMu       sync.Mutex
+	hostTrackers      map[string]*hostTracker
+	maxTrackedClients int
+	hostLimitWindow   time.Duration
+	maxHostsPerClient int
+	trustedNets       []netip.Prefix
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler. The next handler is never
@@ -150,6 +157,7 @@ type RedirDns struct {
 // redirect response or an error page — it is designed as a terminal handler,
 // not a pass-through middleware.
 func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	debug := rd.newRequestDebug(r)
 
 	// extract client IP for access logging when enabled
 	var clientIP string
@@ -166,7 +174,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		if c := rd.logger.Check(zapcore.DebugLevel, "Request cannot be processed because the Host header is invalid"); c != nil {
 			c.Write(zap.String("host", r.Host), zap.Error(err))
 		}
-		if handled, err := rd.redirectToDefault(w, r, clientIP, r.Host); handled {
+		debug.reason = "invalid_host"
+		if handled, err := rd.redirectToDefault(w, r, clientIP, r.Host, &debug); handled {
 			return err
 		}
 		if rd.LogRedirects {
@@ -181,6 +190,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				)
 			}
 		}
+		debug.writeHeaders(w)
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
 			"Redirect Failure",
 			err.Error(),
@@ -188,6 +198,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				"and cannot be used as redirect targets. Ensure the request Host header contains a "+
 				"properly formed domain name (e.g. www.example.com).")
 	}
+
+	debug.host = reqHost
 
 	// check if client has exceeded the per-client distinct-hostname DNS lookup limit
 	if rd.exceedsPerClientHostLimit(r, reqHost, time.Now()) {
@@ -210,6 +222,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				)
 			}
 		}
+		debug.reason = "rate_limited"
+		debug.writeHeaders(w)
 		return rd.writeHtmlResponse(w, http.StatusTooManyRequests,
 			"Too Many Requests",
 			fmt.Sprintf("This client has triggered DNS lookups for more than %d distinct hostnames within a %s window.", rd.maxHostsPerClient, rd.hostLimitWindow),
@@ -220,7 +234,15 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 
 	// create DNS TXT query and perform lookup
 	txtQuery := rd.DnsPrefix + "." + reqHost
-	txtRecord, err := rd.lookupTXT(txtQuery)
+	debug.query = txtQuery
+	txtRecord, err, cached := rd.lookupTXT(txtQuery)
+	debug.hasCached = true
+	debug.cached = cached
+	debug.records = append([]string(nil), txtRecord...)
+	if ttl, ok := rd.remainingCacheTTL(txtQuery); ok {
+		debug.hasCacheTTL = true
+		debug.cacheTTL = ttl
+	}
 
 	// check if the DNS lookup returned a response
 	if err != nil || len(txtRecord) == 0 {
@@ -232,7 +254,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			)
 		}
 		// DNS lookup returned no / invalid response
-		if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost); handled {
+		debug.reason = "dns_lookup_failed"
+		if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost, &debug); handled {
 			return err
 		}
 		var dnsDetail string
@@ -253,10 +276,11 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				)
 			}
 		}
+		debug.writeHeaders(w)
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
 			"Redirect Failure",
 			dnsDetail,
-			fmt.Sprintf("Create a TXT DNS record at %s containing a valid absolute HTTP or HTTPS redirect URL. "+
+			fmt.Sprintf("Create a TXT record at %s containing a valid absolute HTTP or HTTPS redirect URL. "+
 				"If the record already exists, verify that the configured resolver is reachable and that "+
 				"the lookup_timeout setting is sufficient.", txtQuery))
 	}
@@ -290,6 +314,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 					)
 				}
 			}
+			debug.reason = "redirect"
+			debug.writeHeaders(w)
 			if statusCode == htmlRedirectCode {
 				return writeHtmlRedirectResponse(w, targetUrl)
 			}
@@ -298,7 +324,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	}
 
 	// none of the TXT records contained a valid redirect
-	if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost); handled {
+	debug.reason = "no_valid_txt_record"
+	if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost, &debug); handled {
 		return err
 	}
 
@@ -314,18 +341,20 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			)
 		}
 	}
+	debug.writeHeaders(w)
 	return rd.writeHtmlResponse(w, http.StatusNotFound,
 		"Redirect Failure",
 		fmt.Sprintf("TXT records were found at %s but none contained a valid redirect target URL.", txtQuery),
 		"Each TXT record value must be a valid absolute HTTP or HTTPS URL containing only printable ASCII "+
-			"characters. A redirect status code (301, 302, 303, 307, or 308) may optionally follow the URL "+
-			"separated by a space. URLs must not include credentials (user:pass@host).")
+			"characters. An optional status token may follow the URL separated by a space: use the keywords "+
+			"\"temporary\" or \"permanent\" (method-preserving) or a numeric code (301, 302, 303, 307, 308). "+
+			"URLs must not include credentials (user:pass@host).")
 }
 
 // redirectToDefault redirects to DefaultTarget when configured, logging the
 // redirect if log_redirects is enabled. Reports whether the redirect was
 // written so the caller can return immediately.
-func (rd *RedirDns) redirectToDefault(w http.ResponseWriter, r *http.Request, clientIP, host string) (bool, error) {
+func (rd *RedirDns) redirectToDefault(w http.ResponseWriter, r *http.Request, clientIP, host string, debug *requestDebug) (bool, error) {
 	if rd.DefaultTarget == "" {
 		return false, nil
 	}
@@ -346,6 +375,7 @@ func (rd *RedirDns) redirectToDefault(w http.ResponseWriter, r *http.Request, cl
 			)
 		}
 	}
+	debug.writeHeaders(w)
 	if code == htmlRedirectCode {
 		return true, writeHtmlRedirectResponse(w, rd.DefaultTarget)
 	}
@@ -640,6 +670,71 @@ func isSupportedStatusCode(code int) bool {
 		return true
 	}
 	return false
+}
+
+// requestDebug accumulates per-request DNS diagnostic data and writes it as response
+// headers when the request carries an X-Debug-Key header matching the configured key.
+// The zero value is safe to use (active=false means no headers are emitted).
+type requestDebug struct {
+	active      bool
+	written     bool          // guards against writing headers more than once per response
+	host        string        // normalised request hostname
+	query       string        // DNS TXT query name (e.g. "_redirdns.www.example.com")
+	records     []string      // raw TXT record values returned by the lookup
+	cached      bool          // true when the lookup was served from the outer cache
+	hasCached   bool          // true once cached has been set
+	cacheTTL    time.Duration // remaining time until the cache entry expires
+	hasCacheTTL bool          // true once cacheTTL has been set
+	reason      string        // outcome: "redirect", "invalid_host", "rate_limited", etc.
+}
+
+// newRequestDebug returns an active requestDebug when debug_headers is configured and
+// the request's X-Debug-Key header matches the configured key (constant-time comparison).
+// It returns an inactive (zero-value) requestDebug when debug_headers is not configured
+// or the key does not match, so callers never need a nil check.
+func (rd *RedirDns) newRequestDebug(r *http.Request) requestDebug {
+	if len(rd.debugKey) == 0 {
+		return requestDebug{}
+	}
+	key := []byte(r.Header.Get("X-Debug-Key"))
+	if len(key) == 0 || subtle.ConstantTimeCompare(key, rd.debugKey) != 1 {
+		return requestDebug{}
+	}
+	return requestDebug{active: true}
+}
+
+// writeHeaders sets the diagnostic response headers on w. It is a no-op when the
+// requestDebug is inactive (debug_headers not configured or key mismatch) or after
+// the first call (headers must be set before WriteHeader is called by the response
+// writer, and the written flag prevents duplicates when multiple code paths converge).
+func (d *requestDebug) writeHeaders(w http.ResponseWriter) {
+	if !d.active || d.written {
+		return
+	}
+	d.written = true
+	h := w.Header()
+	if d.host != "" {
+		h.Set("X-Redir-Dns-Host", d.host)
+	}
+	if d.query != "" {
+		h.Set("X-Redir-Dns-Query", d.query)
+	}
+	for _, rec := range d.records {
+		h.Add("X-Redir-Dns-Record", rec)
+	}
+	if d.hasCached {
+		if d.cached {
+			h.Set("X-Redir-Dns-Cached", "true")
+		} else {
+			h.Set("X-Redir-Dns-Cached", "false")
+		}
+	}
+	if d.hasCacheTTL {
+		h.Set("X-Redir-Dns-Cache-Ttl", d.cacheTTL.Round(time.Millisecond).String())
+	}
+	if d.reason != "" {
+		h.Set("X-Redir-Dns-Reason", d.reason)
+	}
 }
 
 // Interface guard
