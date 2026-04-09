@@ -115,6 +115,10 @@ type RedirDns struct {
 	// successful redirects log as "redirect"; error responses log as "redirect error"
 	// with a reason field. Default: false.
 	LogRedirects bool `json:"log_redirects,omitempty"`
+	// When true, Cache-Control: max-age=N and Age: N headers are added to successful
+	// redirect responses. max-age is the full TTL of the DNS cache entry; Age is the
+	// number of seconds elapsed since the entry was cached. Default: false.
+	HTTPCacheControl bool `json:"http_cache_control,omitempty"`
 	// Opt-in debug key: when non-empty, requests carrying an X-Debug-Key request header
 	// whose value matches this string receive diagnostic response headers describing the
 	// DNS lookup outcome. The key is compared using a constant-time comparison to avoid
@@ -312,6 +316,12 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 						zap.String("target", targetUrl),
 						zap.Int("status", logStatus),
 					)
+				}
+			}
+			if rd.HTTPCacheControl {
+				if maxAge, age, ok := rd.cacheTiming(txtQuery); ok {
+					w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", int(maxAge.Seconds())))
+					w.Header().Set("Age", fmt.Sprintf("%d", int(age.Seconds())))
 				}
 			}
 			debug.reason = "redirect"
@@ -724,9 +734,9 @@ func (d *requestDebug) writeHeaders(w http.ResponseWriter) {
 	}
 	if d.hasCached {
 		if d.cached {
-			h.Set("X-Redir-Dns-Cached", "true")
+			h.Set("X-Redir-Dns-Cache", "HIT")
 		} else {
-			h.Set("X-Redir-Dns-Cached", "false")
+			h.Set("X-Redir-Dns-Cache", "MISS")
 		}
 	}
 	if d.hasCacheTTL {

@@ -2,6 +2,7 @@ package redirdns
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -760,8 +761,8 @@ func TestDebugHeadersOnSuccessfulRedirect(t *testing.T) {
 	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "redirect" {
 		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "redirect")
 	}
-	if h := rr.Header().Get("X-Redir-Dns-Cached"); h != "false" {
-		t.Fatalf("X-Redir-Dns-Cached = %q, want %q", h, "false")
+	if h := rr.Header().Get("X-Redir-Dns-Cache"); h != "MISS" {
+		t.Fatalf("X-Redir-Dns-Cache = %q, want %q", h, "MISS")
 	}
 	if h := rr.Header().Get("X-Redir-Dns-Cache-Ttl"); h == "" {
 		t.Fatal("X-Redir-Dns-Cache-Ttl should be present after lookup")
@@ -788,8 +789,8 @@ func TestDebugHeadersCacheHitOnSecondRequest(t *testing.T) {
 	if err := rd.ServeHTTP(rr1, makeDebugReq("www.example.com", key), nil); err != nil {
 		t.Fatalf("first ServeHTTP returned error: %v", err)
 	}
-	if h := rr1.Header().Get("X-Redir-Dns-Cached"); h != "false" {
-		t.Fatalf("first request: X-Redir-Dns-Cached = %q, want %q", h, "false")
+	if h := rr1.Header().Get("X-Redir-Dns-Cache"); h != "MISS" {
+		t.Fatalf("first request: X-Redir-Dns-Cache = %q, want %q", h, "MISS")
 	}
 
 	// second request — should be served from cache
@@ -797,8 +798,8 @@ func TestDebugHeadersCacheHitOnSecondRequest(t *testing.T) {
 	if err := rd.ServeHTTP(rr2, makeDebugReq("www.example.com", key), nil); err != nil {
 		t.Fatalf("second ServeHTTP returned error: %v", err)
 	}
-	if h := rr2.Header().Get("X-Redir-Dns-Cached"); h != "true" {
-		t.Fatalf("second request: X-Redir-Dns-Cached = %q, want %q", h, "true")
+	if h := rr2.Header().Get("X-Redir-Dns-Cache"); h != "HIT" {
+		t.Fatalf("second request: X-Redir-Dns-Cache = %q, want %q", h, "HIT")
 	}
 	if calls != 1 {
 		t.Fatalf("lookup called %d times, want 1 (cache should have been used for second request)", calls)
@@ -847,8 +848,8 @@ func TestDebugHeadersOnDNSLookupFailed(t *testing.T) {
 	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "dns_lookup_failed" {
 		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "dns_lookup_failed")
 	}
-	if h := rr.Header().Get("X-Redir-Dns-Cached"); h != "false" {
-		t.Fatalf("X-Redir-Dns-Cached = %q, want %q", h, "false")
+	if h := rr.Header().Get("X-Redir-Dns-Cache"); h != "MISS" {
+		t.Fatalf("X-Redir-Dns-Cache = %q, want %q", h, "MISS")
 	}
 	if h := rr.Header().Get("X-Redir-Dns-Query"); h != "_redirdns.www.example.com" {
 		t.Fatalf("X-Redir-Dns-Query = %q, want %q", h, "_redirdns.www.example.com")
@@ -902,5 +903,125 @@ func TestDebugHeadersDefaultTargetFallbackPreservesReason(t *testing.T) {
 	// reason should still reflect why the fallback was triggered
 	if h := rr.Header().Get("X-Redir-Dns-Reason"); h != "dns_lookup_failed" {
 		t.Fatalf("X-Redir-Dns-Reason = %q, want %q", h, "dns_lookup_failed")
+	}
+}
+
+func TestHTTPCacheControlOnRedirect(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	rd.HTTPCacheControl = true
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return []string{"https://target.example/"}, 60 * time.Second, nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://www.example.com/", nil)
+	req.Host = "www.example.com"
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rr.Code)
+	}
+	cc := rr.Header().Get("Cache-Control")
+	if cc != "max-age=60" {
+		t.Fatalf("Cache-Control = %q, want %q", cc, "max-age=60")
+	}
+	age := rr.Header().Get("Age")
+	if age != "0" {
+		t.Fatalf("Age = %q, want %q", age, "0")
+	}
+}
+
+func TestHTTPCacheControlAbsentWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	// HTTPCacheControl defaults to false
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return []string{"https://target.example/"}, 30 * time.Second, nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://www.example.com/", nil)
+	req.Host = "www.example.com"
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if h := rr.Header().Get("Cache-Control"); h != "" {
+		t.Fatalf("Cache-Control should be absent when http_cache_control is disabled, got %q", h)
+	}
+	if h := rr.Header().Get("Age"); h != "" {
+		t.Fatalf("Age should be absent when http_cache_control is disabled, got %q", h)
+	}
+}
+
+func TestHTTPCacheControlAbsentOnErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	rd.HTTPCacheControl = true
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return nil, 0, errNoTXTRecord
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://www.example.com/", nil)
+	req.Host = "www.example.com"
+	rr := httptest.NewRecorder()
+	if err := rd.ServeHTTP(rr, req, nil); err != nil {
+		t.Fatalf("ServeHTTP returned error: %v", err)
+	}
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+	if h := rr.Header().Get("Cache-Control"); h != "" {
+		t.Fatalf("Cache-Control should be absent on error responses, got %q", h)
+	}
+}
+
+func TestHTTPCacheControlAgeIncrementsOnCacheHit(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	rd.HTTPCacheControl = true
+	rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+		return []string{"https://target.example/"}, 120 * time.Second, nil
+	}
+
+	// first request — populates cache; age should be 0
+	rr1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "http://www.example.com/", nil)
+	req1.Host = "www.example.com"
+	if err := rd.ServeHTTP(rr1, req1, nil); err != nil {
+		t.Fatalf("first ServeHTTP returned error: %v", err)
+	}
+	if cc := rr1.Header().Get("Cache-Control"); cc != "max-age=120" {
+		t.Fatalf("first request Cache-Control = %q, want %q", cc, "max-age=120")
+	}
+
+	// backdate both cachedAt and expiresAt to simulate 30s of elapsed time while
+	// keeping max-age (expiresAt − cachedAt) constant at 120s
+	rd.cacheMu.Lock()
+	key := "_redirdns.www.example.com"
+	if e, ok := rd.cache[key]; ok {
+		e.cachedAt = e.cachedAt.Add(-30 * time.Second)
+		e.expiresAt = e.expiresAt.Add(-30 * time.Second)
+		rd.cache[key] = e
+	}
+	rd.cacheMu.Unlock()
+
+	// second request — served from cache; age should reflect the backdated cachedAt
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "http://www.example.com/", nil)
+	req2.Host = "www.example.com"
+	if err := rd.ServeHTTP(rr2, req2, nil); err != nil {
+		t.Fatalf("second ServeHTTP returned error: %v", err)
+	}
+	if cc := rr2.Header().Get("Cache-Control"); cc != "max-age=120" {
+		t.Fatalf("second request Cache-Control = %q, want %q", cc, "max-age=120")
+	}
+	age := rr2.Header().Get("Age")
+	// age should be ≥ 30 since we backdated cachedAt by 30s
+	ageVal := 0
+	if _, err := fmt.Sscanf(age, "%d", &ageVal); err != nil || ageVal < 30 {
+		t.Fatalf("Age = %q, want >= 30", age)
 	}
 }

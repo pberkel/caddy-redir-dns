@@ -275,6 +275,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
 			zap.Bool("debug_headers", len(rd.debugKey) > 0),
+			zap.Bool("http_cache_control", rd.HTTPCacheControl),
 		)
 	}
 
@@ -362,6 +363,8 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.DebugHeaders = d.Val()
+			case "http_cache_control":
+				rd.HTTPCacheControl = true
 			default:
 				return d.Errf("unrecognized configuration option %q", d.Val())
 			}

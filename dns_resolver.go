@@ -38,6 +38,7 @@ var errNoTXTRecord = errors.New("no TXT DNS record found")
 type dnsCacheEntry struct {
 	txt       []string
 	err       error
+	cachedAt  time.Time // when the entry was stored; used to compute Cache-Control max-age and Age
 	expiresAt time.Time
 }
 
@@ -90,6 +91,7 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 		entry := dnsCacheEntry{
 			txt:       txt, // fresh slice from lookupFunc/resolver; copied on read in cachedLookup and on return below
 			err:       err,
+			cachedAt:  checkNow,
 			expiresAt: checkNow.Add(cacheTTL),
 		}
 		rd.storeLookup(query, entry)
@@ -115,6 +117,20 @@ func (rd *RedirDns) remainingCacheTTL(query string) (time.Duration, bool) {
 		return 0, false
 	}
 	return entry.expiresAt.Sub(now), true
+}
+
+// cacheTiming returns the full cache TTL (max-age = expiresAt − cachedAt) and the
+// elapsed time since the entry was stored (age = now − cachedAt) for query.
+// Returns (0, 0, false) when no live entry exists in the cache.
+func (rd *RedirDns) cacheTiming(query string) (maxAge, age time.Duration, ok bool) {
+	now := time.Now()
+	rd.cacheMu.RLock()
+	entry, exists := rd.cache[query]
+	rd.cacheMu.RUnlock()
+	if !exists || now.After(entry.expiresAt) {
+		return 0, 0, false
+	}
+	return entry.expiresAt.Sub(entry.cachedAt), now.Sub(entry.cachedAt), true
 }
 
 // cachedLookup returns the cached TXT records for query if a non-expired entry exists.

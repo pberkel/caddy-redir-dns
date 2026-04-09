@@ -25,23 +25,24 @@ Several optional parameters are also supported:
 ```caddyfile
 :80 {
 	redir_dns {
-		default_target              https://www.example.com
-		status_code                 temporary
-		dns_prefix                  _redirdns
+		default_target       https://www.example.com
+		status_code          temporary
+		dns_prefix           _redirdns
 
-		resolvers                   1.1.1.1 8.8.8.8
-		lookup_timeout              2s
-		cache_ttl                   30s
-		max_cache_size              10000
+		resolvers            1.1.1.1 8.8.8.8
+		lookup_timeout       2s
+		cache_ttl            30s
+		max_cache_size       10_000
 
-		trusted_proxies    10.0.0.0/8 192.168.0.0/16
-		host_limit_window  1m
+		trusted_proxies      10.0.0.0/8 192.168.0.0/16
+		host_limit_window    1m
 		max_hosts_per_client 50
-		max_tracked_clients  100000
+		max_tracked_clients  100_000
 
-		response_template           /etc/caddy/error.html
+		response_template    /etc/caddy/error.html
+		http_cache_control
 		log_redirects
-		debug_headers               my-secret-key
+		debug_headers        my-secret-key
 	}
 }
 ```
@@ -61,42 +62,49 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 
 **Redirect**
 
-* __default_target__ specifies a redirect URL that will be used if the module is unable to determine an appropriate redirect location (i.e. the hostname is an IP address, the TXT record doesn't exist or is invalid).  If this parameter is not set and an error occurs during redirect processing, a simple 404 response will be returned.
-* __status_code__ specifies the HTTP redirect status to use. Accepts a numeric code (`301`, `302`, `303`, `307`, `308`) or one of three keywords:
-  * `temporary` — `302` for `GET`/`HEAD`, `307` for all other methods (default).
-  * `permanent` — `301` for `GET`/`HEAD`, `308` for all other methods.
-  * `html` — `200 OK` with an HTML body containing a `<meta http-equiv="refresh">` and a JavaScript `window.location.replace()` redirect. Browsers follow the redirect transparently; API clients that inspect the HTTP status code or `Content-Type` receive a `200` with an HTML document rather than a `3xx` redirect.
-
-  Keywords are preferred over numeric codes because `temporary` and `permanent` automatically select the method-preserving code (`307`/`308`) for non-`GET` requests, preserving the request body without any additional configuration. Numeric codes always emit that exact code regardless of request method.
-* __dns_prefix__ specifies the prefix used to construct the TXT DNS record name where redirect information for a given host is stored in the format `<dns_prefix>.<host>`.  Default value: `"_redirdns"`.
+| Parameter | Default | Description |
+|---|---|---|
+| `default_target` | — | Redirect URL used as a fallback when an error occurs (invalid host, missing or invalid TXT record). When unset a `404` is returned instead. |
+| `status_code` | `temporary` | HTTP redirect status. Keywords: `temporary` (`302`/`307`), `permanent` (`301`/`308`), `html` (`200 OK` with meta-refresh + JS redirect for browser-only redirects). Numeric codes `301`, `302`, `303`, `307`, `308` are also accepted and always emit that exact code regardless of method. Keywords are preferred — `temporary` and `permanent` automatically select the method-preserving code (`307`/`308`) for non-`GET` requests. |
+| `dns_prefix` | `_redirdns` | Prefix used to form the TXT record query name: `<dns_prefix>.<host>`. |
 
 **DNS lookup**
 
-* __resolvers__ specifies one or more custom DNS resolvers to use for TXT record lookups. Each value is a hostname or IP address with an optional port (e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Multiple addresses may be given space-separated on a single line or across multiple `resolvers` lines; they are tried in order and port `53` is assumed when no port is specified. When this parameter is absent the system resolver is used.
-* __lookup_timeout__ specifies the maximum time to wait for each DNS TXT lookup before applying fallback behavior.  Duration format must be valid for Go's `time.ParseDuration` (for example `500ms`, `2s`).  Default value: `2s`.
-* __cache_ttl__ specifies the minimum time that successful or failed DNS TXT lookup results are cached in memory. When the TXT record's own DNS TTL exceeds this value the record TTL is used instead, so entries are never served from cache longer than the upstream resolver intended.  Duration format must be valid for Go's `time.ParseDuration` (for example `30s`, `2m`).  Default value: `30s`.
-* __max_cache_size__ specifies the maximum number of DNS TXT lookup results held in the in-memory cache. When the limit is reached, the entry with the soonest expiry is evicted before inserting a new one.  Default value: `10000`.
+| Parameter | Default | Description |
+|---|---|---|
+| `resolvers` | system | One or more DNS resolver addresses (`host` or `host:port`, e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Tried in order; port `53` assumed when omitted. When absent the system resolver is used. |
+| `lookup_timeout` | `2s` | Maximum time to wait for a DNS TXT lookup before applying fallback behaviour. Go duration string; maximum `30s`. |
+| `cache_ttl` | `30s` | Minimum time to cache DNS TXT results in memory. When the record's own DNS TTL is larger it is used instead, so entries are never served from cache longer than the upstream resolver intended. Go duration string. |
+| `max_cache_size` | `10000` | Maximum number of DNS TXT results held in the in-memory cache. The entry with the soonest expiry is evicted when full. |
 
 **DNS lookup guard**
 
-* __trusted_proxies__ specifies CIDRs or IP addresses that are allowed to provide the client IP via the `X-Forwarded-For` or `X-Real-IP` request headers.  `X-Forwarded-For` is checked first (walking right-to-left to find the rightmost non-trusted entry); `X-Real-IP` is used as a fallback (set by nginx and some other proxies).  If the direct peer is not trusted, both headers are ignored and the remote peer address is used instead.
-* __host_limit_window__ specifies the per-client sliding window used to track how many distinct hostnames a client has triggered first-time DNS lookups for.  Duration format must be valid for Go's `time.ParseDuration` (for example `1m`, `30s`).  Default value: `1m`.
-* __max_hosts_per_client__ specifies how many distinct hostnames a single client may trigger first-time DNS lookups for within `host_limit_window`.  Repeat lookups for a hostname already seen within the window are always allowed and do not consume an additional slot.  When the limit is exceeded, requests fall back to `default_target` if configured; otherwise a `429 Too Many Requests` response is returned.  Default value: `50`.
-* __max_tracked_clients__ specifies the maximum number of per-client host-tracking entries held in memory. When the limit is reached, an existing entry is evicted to make room, preventing unbounded memory growth under rotating-IP traffic.  Default value: `100000`.
+| Parameter | Default | Description |
+|---|---|---|
+| `trusted_proxies` | — | CIDRs or IPs allowed to supply the client address via `X-Forwarded-For` or `X-Real-IP`. `X-Forwarded-For` is walked right-to-left to find the rightmost non-trusted entry; `X-Real-IP` is used as a fallback. Both headers are ignored when the direct peer is not trusted. |
+| `host_limit_window` | `1m` | Sliding window over which per-client distinct-hostname DNS lookups are counted. Go duration string. |
+| `max_hosts_per_client` | `50` | Maximum distinct hostnames a single client may trigger first-time DNS lookups for within `host_limit_window`. Repeat lookups for a hostname already seen in the window are always free. Exceeding the limit falls back to `default_target` or returns `429`. |
+| `max_tracked_clients` | `100000` | Maximum number of per-client tracking entries held in memory. An existing entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
 
 **Response**
 
-* __response_template__ overrides the built-in HTML error page with a custom [Go html/template](https://pkg.go.dev/html/template). The value is resolved at provision time as follows: if the value refers to a readable file that path, the file content is used as the template; if no file exists at that path, the value itself is used as an inline template string; any other file error (e.g. permission denied) is treated as a hard failure. The template has access to three fields: `.Title` (short error label), `.Detail` (what went wrong), and `.Resolution` (how to fix it). Accepts a Caddy global placeholder (e.g. `{env.TEMPLATE_PATH}`). See `examples/error_template.html` for a reference implementation.
-* __log_redirects__ enables structured info-level logging of every request handled by the module. When enabled, successful redirects are logged with message `redirect` and error responses with message `redirect error`. Each entry includes the fields `client` (IP address), `method`, `host`, `uri`, `status`, `target` (redirects only), and `reason` (errors only). Logging is disabled by default.
-* __debug_headers__ enables diagnostic response headers for requests that present the correct key. When configured, any request that includes the `X-Debug-Key: <key>` request header with a value matching the configured key receives the following response headers describing the DNS lookup outcome:
-  * `X-Redir-Dns-Host` — the normalised hostname extracted from the request (always present when a valid hostname was found).
-  * `X-Redir-Dns-Query` — the DNS TXT query name used for the lookup (e.g. `_redirdns.www.example.com`). Absent when no lookup was attempted (invalid host, rate-limited).
-  * `X-Redir-Dns-Record` — the raw TXT record value(s) returned by the resolver. One header line per record. Absent when the lookup returned no records.
-  * `X-Redir-Dns-Cached` — `true` when the response was served from the in-memory cache without a new upstream lookup; `false` when a fresh lookup was performed.
-  * `X-Redir-Dns-Cache-Ttl` — the remaining time until the cache entry expires (e.g. `28.5s`). Present whenever a cache entry exists after the lookup.
-  * `X-Redir-Dns-Reason` — the request outcome: `redirect`, `invalid_host`, `rate_limited`, `dns_lookup_failed`, or `no_valid_txt_record`.
+| Parameter | Default | Description |
+|---|---|---|
+| `response_template` | built-in | Custom error page: a file path or inline [Go html/template](https://pkg.go.dev/html/template) string. Resolved at provision time — file content is used when readable; the value is used as a literal template otherwise; any other file error is a hard failure. Template fields: `.Title`, `.Detail`, `.Resolution`. See `examples/error_template.html`. |
+| `log_redirects` | `false` | Emit a structured info-level log entry for every request. Successful redirects log as `redirect`; errors as `redirect error` with fields `client`, `method`, `host`, `uri`, `status`, `target` (redirects only), `reason` (errors only). |
+| `http_cache_control` | `false` | Add `Cache-Control: max-age=N` and `Age: N` headers to successful redirect responses. `max-age` is the full TTL of the DNS cache entry; `Age` is the number of seconds elapsed since the entry was cached. Not added to error responses (404, 429). |
+| `debug_headers` | — | Secret key for opt-in diagnostic response headers. Requests carrying `X-Debug-Key: <key>` with a matching value receive the headers below. Key is constant-time compared. |
 
-  The configured key is compared using a constant-time comparison to prevent timing-based key enumeration. Accepts a Caddy global placeholder (e.g. `{env.DEBUG_KEY}`). Debug headers are disabled by default.
+When `debug_headers` is active the following response headers are added:
+
+| Response Header | Present when | Value |
+|---|---|---|
+| `X-Redir-Dns-Host` | valid hostname found | normalised request hostname |
+| `X-Redir-Dns-Query` | lookup attempted | TXT query name (e.g. `_redirdns.www.example.com`) |
+| `X-Redir-Dns-Record` | records returned | raw TXT record value; one header per record |
+| `X-Redir-Dns-Cache` | lookup attempted | `HIT` or `MISS` |
+| `X-Redir-Dns-Cache-Ttl` | cache entry exists | remaining TTL (e.g. `28.5s`) |
+| `X-Redir-Dns-Reason` | always | `redirect`, `invalid_host`, `rate_limited`, `dns_lookup_failed`, or `no_valid_txt_record` |
 
 ### Usage
 
