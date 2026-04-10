@@ -1,6 +1,6 @@
 # HTTP redirect module for Caddy Server 2
 
-This is a comprehensive rewrite of the [argami/redir-dns](https://github.com/argami/redir-dns) module providing HTTP redirect functionality configured with TXT DNS records.  This allows domain owners manage host-level redirects entirely within DNS without requiring any changes to the Caddy Server configuration.  This module fixes a number of bugs in present in [argami/redir-dns](https://github.com/argami/redir-dns) and implements additional dynamic placeholder substitution functionality.
+A [Caddy](https://caddyserver.com) HTTP handler module that serves redirects configured entirely through DNS TXT records. Domain owners can manage host-level redirects without any changes to the Caddy configuration — adding, updating, or removing a redirect is a DNS change only.
 
 ### Installation
 
@@ -170,3 +170,7 @@ Several examples demonstrate how placeholder values will be substituted:
 | http://www.old-domain.com/blog/?id=100 | https://www.new-domain.com{path}{?query} | https://www.new-domain.com/blog/?id=100 |
 | http://web.old-domain.com/blog/?id=100 | {scheme}://{labels.2}.new-domain.com{uri} | http://web.new-domain.com/blog/?id=100 |
 | https://web.old-domain.com/blog/?id=100 | https://www.new-domain.com?host={host}&uri={%uri}| https://www.new-domain.com?host=web.old-domain.com&uri=%2Fblog%2F%3Fid%3D100 |
+
+### Acknowledgements
+
+This module was inspired by [argami/redir-dns](https://github.com/argami/redir-dns), an earlier Caddy module with the same core idea of storing redirects in DNS TXT records.
