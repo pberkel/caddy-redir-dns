@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.1 — 2026-04-10
+
+### Fixed
+- When custom `resolvers` are configured, TXT lookups now correctly follow CNAME chains regardless of whether the upstream resolver returns the final TXT records in a single response. Previously, if a resolver returned only the CNAME record without resolving it to the TXT answer (e.g. due to SERVFAIL on the chained query), the lookup was reported as `dns_lookup_failed` rather than transparently following the chain. The miekg lookup function now explicitly follows CNAME hops up to a maximum depth of 10, making behaviour consistent with the system resolver path and independent of upstream resolver capabilities.
+
+---
+
 ## v1.3.0 — 2026-04-10
 
 ### Added

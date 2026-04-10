@@ -169,56 +169,94 @@ func (rd *RedirDns) storeLookup(query string, entry dnsCacheEntry) {
 	rd.cache[query] = entry
 }
 
+// maxCNAMEDepth is the maximum number of CNAME hops the miekg lookup will
+// follow before giving up, guarding against infinite CNAME loops.
+const maxCNAMEDepth = 10
+
 // newMiekgLookupFunc returns a lookupFunc that queries the given resolvers using
 // a miekg/dns client. Resolvers must already be in host:port form. Each resolver
 // is tried in order; the first successful response is returned. NXDOMAIN is treated as
-// terminal and short-circuits the remaining resolvers. A single dns.Client is shared
-// across all calls (it is safe for concurrent use).
+// terminal and short-circuits the remaining resolvers. CNAME chains are followed
+// explicitly up to maxCNAMEDepth hops so that lookups succeed regardless of whether
+// the configured resolver returns a fully-resolved answer in a single response or
+// only the next CNAME hop. A single dns.Client is shared across all calls (it is
+// safe for concurrent use).
 func newMiekgLookupFunc(resolvers []string) func(context.Context, string) ([]string, time.Duration, error) {
 	client := &dns.Client{}
-	return func(ctx context.Context, query string) ([]string, time.Duration, error) {
+
+	// queryOnce issues a single TXT query for name. On success it returns the TXT
+	// records and their minimum TTL. When the answer contains a CNAME but no TXT
+	// records, cname is set to the target name so the caller can follow the chain
+	// with an explicit second query rather than relying on the resolver to include
+	// the final TXT records in the same response.
+	queryOnce := func(ctx context.Context, name string) (records []string, ttl time.Duration, cname string, err error) {
 		msg := new(dns.Msg)
-		msg.SetQuestion(dns.Fqdn(query), dns.TypeTXT)
+		msg.SetQuestion(dns.Fqdn(name), dns.TypeTXT)
 		msg.RecursionDesired = true
 
 		var lastErr error
 		for _, ns := range resolvers {
-			resp, _, err := client.ExchangeContext(ctx, msg, ns)
-			if err != nil {
-				lastErr = err
+			resp, _, exchErr := client.ExchangeContext(ctx, msg, ns)
+			if exchErr != nil {
+				lastErr = exchErr
 				continue
 			}
 			if resp.Rcode == dns.RcodeNameError {
 				// NXDOMAIN — record does not exist; no point querying remaining servers
-				return nil, 0, errNoTXTRecord
+				return nil, 0, "", errNoTXTRecord
 			}
 			if resp.Rcode != dns.RcodeSuccess {
 				lastErr = fmt.Errorf("resolver %s returned rcode %s", ns, dns.RcodeToString[resp.Rcode])
 				continue
 			}
 			var (
-				records []string
-				minTTL  = uint32(math.MaxUint32) // will be reduced to the smallest TTL seen
+				recs   []string
+				target string
+				minTTL = uint32(math.MaxUint32)
 			)
 			for _, rr := range resp.Answer {
-				if txt, ok := rr.(*dns.TXT); ok {
+				switch v := rr.(type) {
+				case *dns.TXT:
 					// a single TXT resource record may contain multiple character-strings;
 					// RFC 1035 §3.3.14 specifies they are concatenated without separator
-					records = append(records, strings.Join(txt.Txt, ""))
-					if txt.Hdr.Ttl < minTTL {
-						minTTL = txt.Hdr.Ttl
+					recs = append(recs, strings.Join(v.Txt, ""))
+					if v.Hdr.Ttl < minTTL {
+						minTTL = v.Hdr.Ttl
+					}
+				case *dns.CNAME:
+					if target == "" {
+						target = v.Target
 					}
 				}
 			}
-			if len(records) == 0 {
-				return nil, 0, errNoTXTRecord
+			if len(recs) > 0 {
+				return recs, time.Duration(minTTL) * time.Second, "", nil
 			}
-			return records, time.Duration(minTTL) * time.Second, nil
+			if target != "" {
+				return nil, 0, target, nil
+			}
+			return nil, 0, "", errNoTXTRecord
 		}
 		if lastErr != nil {
-			return nil, 0, lastErr
+			return nil, 0, "", lastErr
 		}
-		return nil, 0, errNoTXTRecord
+		return nil, 0, "", errNoTXTRecord
+	}
+
+	return func(ctx context.Context, query string) ([]string, time.Duration, error) {
+		name := query
+		for depth := 0; depth < maxCNAMEDepth; depth++ {
+			records, ttl, cname, err := queryOnce(ctx, name)
+			if err != nil {
+				return nil, 0, err
+			}
+			if len(records) > 0 {
+				return records, ttl, nil
+			}
+			// No TXT records but a CNAME was returned — follow the chain.
+			name = cname
+		}
+		return nil, 0, fmt.Errorf("CNAME chain exceeded %d hops", maxCNAMEDepth)
 	}
 }
 

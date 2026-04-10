@@ -3,10 +3,13 @@ package redirdns
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 func TestLookupTXTCachesSuccessAndError(t *testing.T) {
@@ -120,6 +123,226 @@ func TestLookupTXTSingleflightDedupesConcurrentCalls(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("lookup function called %d times, want 1", calls.Load())
+	}
+}
+
+// startTestDNSServer starts a local UDP DNS server using mux and returns its
+// address. The server is shut down automatically when the test ends.
+func startTestDNSServer(t *testing.T, mux *dns.ServeMux) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Net: "udp", Handler: mux}
+	go srv.ActivateAndServe() //nolint:errcheck
+	t.Cleanup(func() { srv.Shutdown() }) //nolint:errcheck
+	return pc.LocalAddr().String()
+}
+
+func TestMiekgLookupTXTDirect(t *testing.T) {
+	t.Parallel()
+
+	mux := dns.NewServeMux()
+	mux.HandleFunc("_redirect.www.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.TXT{
+				Hdr: dns.RR_Header{Name: "_redirect.www.example.com.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+				Txt: []string{"https://www.new-domain.com"},
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	addr := startTestDNSServer(t, mux)
+
+	lookupFunc := newMiekgLookupFunc([]string{addr})
+	records, ttl, err := lookupFunc(context.Background(), "_redirect.www.example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(records) != 1 || records[0] != "https://www.new-domain.com" {
+		t.Fatalf("unexpected records: %v", records)
+	}
+	if ttl != 60*time.Second {
+		t.Fatalf("unexpected TTL: %v, want 60s", ttl)
+	}
+}
+
+func TestMiekgLookupTXTFollowsCNAME(t *testing.T) {
+	t.Parallel()
+
+	// Simulates a non-recursive resolver that returns only the CNAME record for
+	// the queried name rather than resolving it to the final TXT answer. The
+	// lookup function must follow the CNAME with an explicit second query.
+	mux := dns.NewServeMux()
+	mux.HandleFunc("_redirect.www.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.CNAME{
+				Hdr:    dns.RR_Header{Name: "_redirect.www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 30},
+				Target: "redirector.example.net.",
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	mux.HandleFunc("redirector.example.net.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.TXT{
+				Hdr: dns.RR_Header{Name: "redirector.example.net.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 120},
+				Txt: []string{"https://www.new-domain.com"},
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	addr := startTestDNSServer(t, mux)
+
+	lookupFunc := newMiekgLookupFunc([]string{addr})
+	records, ttl, err := lookupFunc(context.Background(), "_redirect.www.example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(records) != 1 || records[0] != "https://www.new-domain.com" {
+		t.Fatalf("unexpected records: %v", records)
+	}
+	if ttl != 120*time.Second {
+		t.Fatalf("unexpected TTL: %v, want 120s", ttl)
+	}
+}
+
+func TestMiekgLookupTXTFollowsCNAMEChain(t *testing.T) {
+	t.Parallel()
+
+	// Two-hop CNAME chain: queried → intermediate → final TXT.
+	mux := dns.NewServeMux()
+	mux.HandleFunc("_redirect.www.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.CNAME{
+				Hdr:    dns.RR_Header{Name: "_redirect.www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 30},
+				Target: "intermediate.example.net.",
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	mux.HandleFunc("intermediate.example.net.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.CNAME{
+				Hdr:    dns.RR_Header{Name: "intermediate.example.net.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+				Target: "redirector.example.net.",
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	mux.HandleFunc("redirector.example.net.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.TXT{
+				Hdr: dns.RR_Header{Name: "redirector.example.net.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 90},
+				Txt: []string{"https://www.new-domain.com"},
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	addr := startTestDNSServer(t, mux)
+
+	lookupFunc := newMiekgLookupFunc([]string{addr})
+	records, _, err := lookupFunc(context.Background(), "_redirect.www.example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(records) != 1 || records[0] != "https://www.new-domain.com" {
+		t.Fatalf("unexpected records: %v", records)
+	}
+}
+
+func TestMiekgLookupTXTCNAMEAndTXTInSingleResponse(t *testing.T) {
+	t.Parallel()
+
+	// Simulates a recursive resolver that returns both the CNAME and the final
+	// TXT records in a single response. The lookup function should use the TXT
+	// records from the answer directly without issuing a follow-up query.
+	mux := dns.NewServeMux()
+	mux.HandleFunc("_redirect.www.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.CNAME{
+				Hdr:    dns.RR_Header{Name: "_redirect.www.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 30},
+				Target: "redirector.example.net.",
+			},
+			&dns.TXT{
+				Hdr: dns.RR_Header{Name: "redirector.example.net.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 120},
+				Txt: []string{"https://www.new-domain.com"},
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	addr := startTestDNSServer(t, mux)
+
+	lookupFunc := newMiekgLookupFunc([]string{addr})
+	records, ttl, err := lookupFunc(context.Background(), "_redirect.www.example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(records) != 1 || records[0] != "https://www.new-domain.com" {
+		t.Fatalf("unexpected records: %v", records)
+	}
+	if ttl != 120*time.Second {
+		t.Fatalf("unexpected TTL: %v, want 120s", ttl)
+	}
+}
+
+func TestMiekgLookupTXTNXDOMAIN(t *testing.T) {
+	t.Parallel()
+
+	mux := dns.NewServeMux()
+	mux.HandleFunc("_redirect.missing.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	addr := startTestDNSServer(t, mux)
+
+	lookupFunc := newMiekgLookupFunc([]string{addr})
+	_, _, err := lookupFunc(context.Background(), "_redirect.missing.example.com")
+	if !errors.Is(err, errNoTXTRecord) {
+		t.Fatalf("expected errNoTXTRecord, got %v", err)
+	}
+}
+
+func TestMiekgLookupTXTCNAMELoopExceedsMaxDepth(t *testing.T) {
+	t.Parallel()
+
+	// Every query returns a CNAME pointing back to itself, creating an infinite
+	// loop. The lookup function must give up after maxCNAMEDepth hops.
+	mux := dns.NewServeMux()
+	mux.HandleFunc("loop.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.CNAME{
+				Hdr:    dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+				Target: "loop.example.com.",
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	addr := startTestDNSServer(t, mux)
+
+	lookupFunc := newMiekgLookupFunc([]string{addr})
+	_, _, err := lookupFunc(context.Background(), "loop.example.com")
+	if err == nil {
+		t.Fatal("expected error for CNAME loop, got nil")
 	}
 }
 
