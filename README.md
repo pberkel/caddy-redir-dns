@@ -32,6 +32,7 @@ Several optional parameters are also supported:
 		resolvers            1.1.1.1 8.8.8.8
 		lookup_timeout       2s
 		cache_ttl            30s
+		negative_cache_ttl   5s
 		max_cache_size       10_000
 
 		trusted_proxies      10.0.0.0/8 192.168.0.0/16
@@ -74,7 +75,8 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 |---|---|---|
 | `resolvers` | system | One or more DNS resolver addresses (`host` or `host:port`, e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Tried in order; port `53` assumed when omitted. When absent the system resolver is used. |
 | `lookup_timeout` | `2s` | Maximum time to wait for a DNS TXT lookup before applying fallback behaviour. Go duration string; maximum `30s`. |
-| `cache_ttl` | `30s` | Minimum time to cache DNS TXT results in memory. When the record's own DNS TTL is larger it is used instead, so entries are never served from cache longer than the upstream resolver intended. Go duration string. |
+| `cache_ttl` | `30s` | Minimum time to cache successful DNS TXT results in memory. When the record's own DNS TTL is larger it is used instead, so entries are never served from cache longer than the upstream resolver intended. Go duration string. |
+| `negative_cache_ttl` | `5s` | Time to cache failed lookups (NXDOMAIN, no record found, timeout). Kept shorter than `cache_ttl` so that newly-added TXT records are discovered quickly. Go duration string. |
 | `max_cache_size` | `10000` | Maximum number of DNS TXT results held in the in-memory cache. The entry with the soonest expiry is evicted when full. |
 
 **DNS lookup guard**

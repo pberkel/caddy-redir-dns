@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.2 — 2026-04-14
+
+### Added
+- `negative_cache_ttl` configuration parameter (default: `5s`) sets a separate, shorter TTL for failed DNS lookups (NXDOMAIN, no TXT record found, timeout). Previously all cache entries — successful and failed — shared the same `cache_ttl`, so a missing record would be cached for the full 30 seconds, delaying discovery of newly-added TXT records. Failed entries are now cached for `negative_cache_ttl` while successful entries continue to use `cache_ttl` (or the upstream DNS record TTL, whichever is larger).
+
+---
+
 ## v1.3.1 — 2026-04-10
 
 ### Fixed

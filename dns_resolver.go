@@ -23,6 +23,9 @@ const (
 	// Default DNS TXT cache TTL
 	defaultDnsCacheTTL = 30 * time.Second
 
+	// Default DNS TXT negative cache TTL (applied to failed/NXDOMAIN lookups)
+	defaultNegativeCacheTTL = 5 * time.Second
+
 	// Default maximum number of DNS TXT cache entries
 	defaultMaxCacheSize = 10_000
 )
@@ -83,10 +86,16 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 			err = errNoTXTRecord
 		}
 
+		// failed lookups use the (shorter) negative cache TTL; successful lookups
 		// honour the DNS record TTL when it is larger than the configured cache TTL
-		cacheTTL := rd.lookupTTL
-		if dnsTTL > cacheTTL {
-			cacheTTL = dnsTTL
+		var cacheTTL time.Duration
+		if err != nil {
+			cacheTTL = rd.negativeLookupTTL
+		} else {
+			cacheTTL = rd.lookupTTL
+			if dnsTTL > cacheTTL {
+				cacheTTL = dnsTTL
+			}
 		}
 		entry := dnsCacheEntry{
 			txt:       txt, // fresh slice from lookupFunc/resolver; copied on read in cachedLookup and on return below

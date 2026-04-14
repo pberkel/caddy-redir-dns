@@ -135,7 +135,7 @@ func startTestDNSServer(t *testing.T, mux *dns.ServeMux) string {
 		t.Fatalf("failed to listen: %v", err)
 	}
 	srv := &dns.Server{PacketConn: pc, Net: "udp", Handler: mux}
-	go srv.ActivateAndServe() //nolint:errcheck
+	go srv.ActivateAndServe()            //nolint:errcheck
 	t.Cleanup(func() { srv.Shutdown() }) //nolint:errcheck
 	return pc.LocalAddr().String()
 }

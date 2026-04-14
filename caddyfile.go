@@ -65,25 +65,27 @@ func init() {
 // (e.g. in tests).
 func New() *RedirDns {
 	rd := RedirDns{
-		DnsPrefix:               defaultDnsPrefix,
-		StatusCode:              "temporary",
-		LookupTimeout:           defaultDnsLookupTimeout.String(),
-		CacheTTL:                defaultDnsCacheTTL.String(),
-		HostLimitWindow:   defaultHostLimitWindow.String(),
-		MaxHostsPerClient: StringOrInt(strconv.Itoa(defaultMaxHostsPerClient)),
-		MaxCacheSize:      StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
-		MaxTrackedClients: StringOrInt(strconv.Itoa(defaultMaxTrackedClients)),
+		DnsPrefix:           defaultDnsPrefix,
+		StatusCode:          "temporary",
+		LookupTimeout:       defaultDnsLookupTimeout.String(),
+		CacheTTL:            defaultDnsCacheTTL.String(),
+		NegativeCacheTTL:    defaultNegativeCacheTTL.String(),
+		HostLimitWindow:     defaultHostLimitWindow.String(),
+		MaxHostsPerClient:   StringOrInt(strconv.Itoa(defaultMaxHostsPerClient)),
+		MaxCacheSize:        StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
+		MaxTrackedClients:   StringOrInt(strconv.Itoa(defaultMaxTrackedClients)),
 		resolver:            net.DefaultResolver,
 		statusCodeAuto:      true,
 		statusCodePermanent: false,
-		lookupTTL:         defaultDnsCacheTTL,
-		lookupMax:         defaultDnsLookupTimeout,
-		cache:             make(map[string]dnsCacheEntry),
-		maxCacheSize:      defaultMaxCacheSize,
-		hostTrackers:      make(map[string]*hostTracker),
-		maxTrackedClients: defaultMaxTrackedClients,
-		hostLimitWindow:   defaultHostLimitWindow,
-		maxHostsPerClient: defaultMaxHostsPerClient,
+		lookupTTL:           defaultDnsCacheTTL,
+		negativeLookupTTL:   defaultNegativeCacheTTL,
+		lookupMax:           defaultDnsLookupTimeout,
+		cache:               make(map[string]dnsCacheEntry),
+		maxCacheSize:        defaultMaxCacheSize,
+		hostTrackers:        make(map[string]*hostTracker),
+		maxTrackedClients:   defaultMaxTrackedClients,
+		hostLimitWindow:     defaultHostLimitWindow,
+		maxHostsPerClient:   defaultMaxHostsPerClient,
 	}
 	return &rd
 }
@@ -126,6 +128,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	rd.DnsPrefix = repl.ReplaceAll(rd.DnsPrefix, "")
 	rd.LookupTimeout = repl.ReplaceAll(rd.LookupTimeout, "")
 	rd.CacheTTL = repl.ReplaceAll(rd.CacheTTL, "")
+	rd.NegativeCacheTTL = repl.ReplaceAll(rd.NegativeCacheTTL, "")
 	rd.HostLimitWindow = repl.ReplaceAll(rd.HostLimitWindow, "")
 	rd.StatusCode = StringOrInt(repl.ReplaceAll(string(rd.StatusCode), ""))
 	rd.MaxHostsPerClient = StringOrInt(repl.ReplaceAll(string(rd.MaxHostsPerClient), ""))
@@ -181,6 +184,12 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	}
 	if rd.lookupTTL <= 0 {
 		return fmt.Errorf("cache_ttl must be greater than 0")
+	}
+	if rd.negativeLookupTTL, err = time.ParseDuration(rd.NegativeCacheTTL); err != nil {
+		return fmt.Errorf("invalid negative_cache_ttl %q: %v", rd.NegativeCacheTTL, err)
+	}
+	if rd.negativeLookupTTL <= 0 {
+		return fmt.Errorf("negative_cache_ttl must be greater than 0")
 	}
 	if rd.hostLimitWindow, err = time.ParseDuration(rd.HostLimitWindow); err != nil {
 		return fmt.Errorf("invalid host_limit_window %q: %v", rd.HostLimitWindow, err)
@@ -267,6 +276,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.String("status_code", string(rd.StatusCode)),
 			zap.Duration("lookup_timeout", rd.lookupMax),
 			zap.Duration("cache_ttl", rd.lookupTTL),
+			zap.Duration("negative_cache_ttl", rd.negativeLookupTTL),
 			zap.Int("max_cache_size", rd.maxCacheSize),
 			zap.Int("max_tracked_clients", rd.maxTrackedClients),
 			zap.Duration("host_limit_window", rd.hostLimitWindow),
@@ -283,7 +293,6 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 
 	return nil
 }
-
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -315,6 +324,11 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.CacheTTL = d.Val()
+			case "negative_cache_ttl":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.NegativeCacheTTL = d.Val()
 			case "host_limit_window":
 				if !d.NextArg() {
 					return d.ArgErr()

@@ -81,6 +81,10 @@ type RedirDns struct {
 	// TTL for in-memory DNS TXT lookup cache entries. Default: 30s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.CACHE_TTL}").
 	CacheTTL string `json:"cache_ttl,omitempty"`
+	// TTL applied to failed lookups (NXDOMAIN, no record, timeout). Kept shorter than
+	// cache_ttl so that newly-added TXT records are discovered quickly. Default: 5s
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.NEGATIVE_CACHE_TTL}").
+	NegativeCacheTTL string `json:"negative_cache_ttl,omitempty"`
 	// Maximum number of DNS TXT records held in the in-memory cache. Default: 10000
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CACHE_SIZE}").
 	MaxCacheSize StringOrInt `json:"max_cache_size,omitempty"`
@@ -138,14 +142,15 @@ type RedirDns struct {
 	replacer            *strings.Replacer // shorthand → expanded placeholder pre-processor
 
 	// DNS lookup
-	resolver     *net.Resolver
-	lookupTTL    time.Duration
-	lookupMax    time.Duration
-	lookupFunc   func(context.Context, string) ([]string, time.Duration, error) // overridden in tests
-	cacheMu      sync.RWMutex
-	cache        map[string]dnsCacheEntry
-	maxCacheSize int
-	lookupGroup  singleflight.Group
+	resolver          *net.Resolver
+	lookupTTL         time.Duration
+	negativeLookupTTL time.Duration
+	lookupMax         time.Duration
+	lookupFunc        func(context.Context, string) ([]string, time.Duration, error) // overridden in tests
+	cacheMu           sync.RWMutex
+	cache             map[string]dnsCacheEntry
+	maxCacheSize      int
+	lookupGroup       singleflight.Group
 
 	// DNS lookup guard
 	hostLimitMu       sync.Mutex
