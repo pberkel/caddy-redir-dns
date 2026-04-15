@@ -3,6 +3,7 @@ package redirdns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -371,11 +372,63 @@ func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
 		}
 	}
 
-	rd.cacheMu.RLock()
-	cacheLen := len(rd.cache)
-	rd.cacheMu.RUnlock()
+	rd.dnsCache.mu.RLock()
+	cacheLen := len(rd.dnsCache.entries)
+	rd.dnsCache.mu.RUnlock()
 
 	if cacheLen > maxSize {
 		t.Fatalf("cache size = %d, want <= %d", cacheLen, maxSize)
+	}
+}
+
+func TestClassifyLookupError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{nil, "none"},
+		{context.DeadlineExceeded, "timeout"},
+		{errNoTXTRecord, "not_found"},
+		{&net.DNSError{IsNotFound: true}, "nxdomain"},
+		{&net.DNSError{IsTimeout: true}, "timeout"},
+		{&net.DNSError{IsTemporary: true}, "temporary_dns_error"},
+		{&net.DNSError{}, "dns_error"},
+		{fmt.Errorf("some other error"), "lookup_error"},
+	}
+	for _, tt := range tests {
+		got := classifyLookupError(tt.err)
+		if got != tt.want {
+			t.Errorf("classifyLookupError(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestParseIPFromAddrPortOrLiteral(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"203.0.113.1", "203.0.113.1", true},
+		{"2001:db8::1", "2001:db8::1", true},
+		{"203.0.113.1:8080", "203.0.113.1", true},
+		{"[2001:db8::1]:443", "2001:db8::1", true},
+		{"", "", false},
+		{"not-an-ip", "", false},
+		{"not-an-ip:port", "", false},
+	}
+	for _, tt := range tests {
+		addr, ok := parseIPFromAddrPortOrLiteral(tt.input)
+		if ok != tt.ok {
+			t.Errorf("parseIPFromAddrPortOrLiteral(%q) ok = %v, want %v", tt.input, ok, tt.ok)
+			continue
+		}
+		if ok && addr.String() != tt.want {
+			t.Errorf("parseIPFromAddrPortOrLiteral(%q) = %q, want %q", tt.input, addr.String(), tt.want)
+		}
 	}
 }

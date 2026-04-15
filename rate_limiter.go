@@ -47,9 +47,9 @@ func (rd *RedirDns) startHostLimitCleanup(ctx caddy.Context) {
 		for {
 			select {
 			case now := <-ticker.C:
-				rd.hostLimitMu.Lock()
+				rd.hostLimit.mu.Lock()
 				rd.cleanupHostLimitState(now)
-				rd.hostLimitMu.Unlock()
+				rd.hostLimit.mu.Unlock()
 			case <-ctx.Done():
 				return
 			}
@@ -81,19 +81,19 @@ func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now 
 		}
 	}
 
-	rd.hostLimitMu.Lock()
-	defer rd.hostLimitMu.Unlock()
+	rd.hostLimit.mu.Lock()
+	defer rd.hostLimit.mu.Unlock()
 
-	tracker, ok := rd.hostTrackers[clientID]
+	tracker, ok := rd.hostLimit.trackers[clientID]
 	if !ok {
 		// evict one entry before inserting a new one to keep the map within maxTrackedClients
-		if len(rd.hostTrackers) >= rd.maxTrackedClients {
+		if len(rd.hostLimit.trackers) >= rd.maxTrackedClients {
 			rd.evictOneHostTracker()
 		}
 		tracker = &hostTracker{
 			hosts: make(map[string]time.Time),
 		}
-		rd.hostTrackers[clientID] = tracker
+		rd.hostLimit.trackers[clientID] = tracker
 	}
 
 	// sweep expired host entries for this client on the request path; the background
@@ -125,8 +125,8 @@ func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now 
 // recently active; any eviction strategy is equivalent in practice.
 // A single map iteration is O(1) amortised and avoids an O(n) scan.
 func (rd *RedirDns) evictOneHostTracker() {
-	for id := range rd.hostTrackers {
-		delete(rd.hostTrackers, id)
+	for id := range rd.hostLimit.trackers {
+		delete(rd.hostLimit.trackers, id)
 		return
 	}
 }
@@ -134,14 +134,14 @@ func (rd *RedirDns) evictOneHostTracker() {
 // cleanupHostLimitState purges expired host entries and idle trackers.
 // Must be called with hostLimitMu held.
 func (rd *RedirDns) cleanupHostLimitState(now time.Time) {
-	for clientID, tracker := range rd.hostTrackers {
+	for clientID, tracker := range rd.hostLimit.trackers {
 		for host, seenAt := range tracker.hosts {
 			if now.Sub(seenAt) > rd.hostLimitWindow {
 				delete(tracker.hosts, host)
 			}
 		}
 		if len(tracker.hosts) == 0 && now.Sub(tracker.lastSeen) > rd.hostLimitWindow {
-			delete(rd.hostTrackers, clientID)
+			delete(rd.hostLimit.trackers, clientID)
 		}
 	}
 }

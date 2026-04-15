@@ -677,7 +677,7 @@ func newTestRedirDns(t *testing.T) *RedirDns {
 		t.Fatalf("failed to parse response template: %v", err)
 	}
 	rd.responseTpl = tpl
-	rd.cache = make(map[string]dnsCacheEntry)
+	rd.dnsCache = &dnsCache{entries: make(map[string]dnsCacheEntry)}
 	return rd
 }
 
@@ -999,14 +999,14 @@ func TestHTTPCacheControlAgeIncrementsOnCacheHit(t *testing.T) {
 
 	// backdate both cachedAt and expiresAt to simulate 30s of elapsed time while
 	// keeping max-age (expiresAt − cachedAt) constant at 120s
-	rd.cacheMu.Lock()
+	rd.dnsCache.mu.Lock()
 	key := "_redirdns.www.example.com"
-	if e, ok := rd.cache[key]; ok {
+	if e, ok := rd.dnsCache.entries[key]; ok {
 		e.cachedAt = e.cachedAt.Add(-30 * time.Second)
 		e.expiresAt = e.expiresAt.Add(-30 * time.Second)
-		rd.cache[key] = e
+		rd.dnsCache.entries[key] = e
 	}
-	rd.cacheMu.Unlock()
+	rd.dnsCache.mu.Unlock()
 
 	// second request — served from cache; age should reflect the backdated cachedAt
 	rr2 := httptest.NewRecorder()

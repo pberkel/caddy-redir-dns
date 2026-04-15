@@ -3,6 +3,7 @@ package redirdns
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -27,9 +28,9 @@ func TestExceedsPerClientHostLimitRespectsMaxTrackedClients(t *testing.T) {
 	rd.exceedsPerClientHostLimit(makeReq("203.0.113.2"), "b.example.com", now)
 	rd.exceedsPerClientHostLimit(makeReq("203.0.113.3"), "c.example.com", now)
 
-	rd.hostLimitMu.Lock()
-	clientsLen := len(rd.hostTrackers)
-	rd.hostLimitMu.Unlock()
+	rd.hostLimit.mu.Lock()
+	clientsLen := len(rd.hostLimit.trackers)
+	rd.hostLimit.mu.Unlock()
 
 	if clientsLen > maxClients {
 		t.Fatalf("host trackers map size = %d, want <= %d", clientsLen, maxClients)
@@ -170,5 +171,149 @@ func TestParseTrustedProxyPrefixesRejectsInvalidEntry(t *testing.T) {
 	_, err := parseTrustedProxyPrefixes([]string{"not-an-ip"})
 	if err == nil {
 		t.Fatalf("expected parseTrustedProxyPrefixes error for invalid entry")
+	}
+}
+
+func TestIsRateLimitBypassed(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8", "192.168.1.0/24"})
+	if err != nil {
+		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
+	}
+	rd.bypassNets = nets
+
+	tests := []struct {
+		ip   string
+		want bool
+	}{
+		{"10.0.0.1", true},
+		{"10.255.255.255", true},
+		{"192.168.1.50", true},
+		{"192.168.2.1", false},
+		{"203.0.113.1", false},
+	}
+	for _, tt := range tests {
+		addr, err := netip.ParseAddr(tt.ip)
+		if err != nil {
+			t.Fatalf("ParseAddr(%q): %v", tt.ip, err)
+		}
+		if got := rd.isRateLimitBypassed(addr); got != tt.want {
+			t.Errorf("isRateLimitBypassed(%q) = %v, want %v", tt.ip, got, tt.want)
+		}
+	}
+}
+
+func TestIsRateLimitBypassedEmptyNets(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	// bypassNets is nil by default — nothing should be bypassed
+	addr, _ := netip.ParseAddr("10.0.0.1")
+	if rd.isRateLimitBypassed(addr) {
+		t.Fatal("expected isRateLimitBypassed to return false with no bypass nets configured")
+	}
+}
+
+func TestExceedsPerClientHostLimitBypassesConfiguredCIDR(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
+	}
+	rd.bypassNets = nets
+	rd.maxHostsPerClient = 1 // would normally block after 1 unique host
+	rd.hostLimitWindow = time.Minute
+
+	makeReq := func(ip string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+		req.RemoteAddr = ip + ":1234"
+		return req
+	}
+
+	now := time.Now()
+	// Bypass IP: should not be rate-limited even after exceeding maxHostsPerClient
+	rd.exceedsPerClientHostLimit(makeReq("10.1.2.3"), "a.example.com", now)
+	if rd.exceedsPerClientHostLimit(makeReq("10.1.2.3"), "b.example.com", now) {
+		t.Fatal("expected bypass IP to not be rate-limited")
+	}
+
+	// Non-bypass IP: should be rate-limited
+	rd.exceedsPerClientHostLimit(makeReq("203.0.113.1"), "a.example.com", now)
+	if !rd.exceedsPerClientHostLimit(makeReq("203.0.113.1"), "b.example.com", now) {
+		t.Fatal("expected non-bypass IP to be rate-limited after exceeding maxHostsPerClient")
+	}
+}
+
+func TestCleanupHostLimitStateRemovesExpiredEntries(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	rd.hostLimitWindow = time.Minute
+
+	past := time.Now().Add(-2 * time.Minute)
+	recent := time.Now()
+
+	rd.hostLimit.mu.Lock()
+	rd.hostLimit.trackers["old-client"] = &hostTracker{
+		hosts:    map[string]time.Time{"a.example.com": past},
+		lastSeen: past,
+	}
+	rd.hostLimit.trackers["active-client"] = &hostTracker{
+		hosts:    map[string]time.Time{"b.example.com": recent},
+		lastSeen: recent,
+	}
+	rd.cleanupHostLimitState(time.Now())
+	rd.hostLimit.mu.Unlock()
+
+	rd.hostLimit.mu.Lock()
+	_, oldExists := rd.hostLimit.trackers["old-client"]
+	_, activeExists := rd.hostLimit.trackers["active-client"]
+	rd.hostLimit.mu.Unlock()
+
+	if oldExists {
+		t.Fatal("expected expired tracker to be removed")
+	}
+	if !activeExists {
+		t.Fatal("expected active tracker to be retained")
+	}
+}
+
+func TestCleanupHostLimitStateRemovesExpiredHostsButKeepsTracker(t *testing.T) {
+	t.Parallel()
+
+	rd := newTestRedirDns(t)
+	rd.hostLimitWindow = time.Minute
+
+	past := time.Now().Add(-2 * time.Minute)
+	recent := time.Now()
+
+	rd.hostLimit.mu.Lock()
+	// Client is still active (lastSeen recent) but has one expired host entry
+	rd.hostLimit.trackers["mixed-client"] = &hostTracker{
+		hosts: map[string]time.Time{
+			"old.example.com":    past,
+			"recent.example.com": recent,
+		},
+		lastSeen: recent,
+	}
+	rd.cleanupHostLimitState(time.Now())
+	rd.hostLimit.mu.Unlock()
+
+	rd.hostLimit.mu.Lock()
+	tracker, exists := rd.hostLimit.trackers["mixed-client"]
+	rd.hostLimit.mu.Unlock()
+
+	if !exists {
+		t.Fatal("expected active tracker to be retained")
+	}
+	if _, ok := tracker.hosts["old.example.com"]; ok {
+		t.Fatal("expected expired host entry to be removed")
+	}
+	if _, ok := tracker.hosts["recent.example.com"]; !ok {
+		t.Fatal("expected recent host entry to be retained")
 	}
 }

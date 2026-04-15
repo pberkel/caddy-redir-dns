@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.4 — 2026-04-15
+
+### Changed
+- Test coverage increased from 61.9% to 67.3%. New tests cover `isRateLimitBypassed`, `cleanupHostLimitState`, `classifyLookupError`, `parseIPFromAddrPortOrLiteral`, and the `rate_limit_bypass` Caddyfile directive.
+
+---
+
 ## v1.3.3 — 2026-04-15
 
 ### Added

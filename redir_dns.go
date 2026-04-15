@@ -151,19 +151,33 @@ type RedirDns struct {
 	negativeLookupTTL time.Duration
 	lookupMax         time.Duration
 	lookupFunc        func(context.Context, string) ([]string, time.Duration, error) // overridden in tests
-	cacheMu           sync.RWMutex
-	cache             map[string]dnsCacheEntry
+	dnsCache          *dnsCache
 	maxCacheSize      int
-	lookupGroup       singleflight.Group
 
 	// DNS lookup guard
-	hostLimitMu       sync.Mutex
-	hostTrackers      map[string]*hostTracker
+	hostLimit         *hostLimitState
 	maxTrackedClients int
 	hostLimitWindow   time.Duration
 	maxHostsPerClient int
 	trustedNets       []netip.Prefix
 	bypassNets        []netip.Prefix
+}
+
+// dnsCache holds the in-memory DNS TXT result cache and its associated
+// concurrency primitives. Allocated as a pointer in Provision so that
+// RedirDns itself contains no mutex fields and can be registered as a
+// value type via caddy.RegisterModule(RedirDns{}).
+type dnsCache struct {
+	mu      sync.RWMutex
+	entries map[string]dnsCacheEntry
+	group   singleflight.Group
+}
+
+// hostLimitState holds the per-client hostname tracker map and its mutex.
+// Allocated as a pointer in Provision for the same reason as dnsCache.
+type hostLimitState struct {
+	mu       sync.Mutex
+	trackers map[string]*hostTracker
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler. The next handler is never

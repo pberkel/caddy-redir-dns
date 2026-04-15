@@ -57,7 +57,7 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 		return txt, err, true
 	}
 
-	value, _, _ := rd.lookupGroup.Do(query, func() (any, error) {
+	value, _, _ := rd.dnsCache.group.Do(query, func() (any, error) {
 		// re-check the cache inside the singleflight closure: a previous call for the
 		// same key may have populated it between the outer cache miss and acquiring the
 		// singleflight slot
@@ -120,9 +120,9 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 // Returns (0, false) when no live entry exists in the cache.
 func (rd *RedirDns) remainingCacheTTL(query string) (time.Duration, bool) {
 	now := time.Now()
-	rd.cacheMu.RLock()
-	entry, ok := rd.cache[query]
-	rd.cacheMu.RUnlock()
+	rd.dnsCache.mu.RLock()
+	entry, ok := rd.dnsCache.entries[query]
+	rd.dnsCache.mu.RUnlock()
 	if !ok || now.After(entry.expiresAt) {
 		return 0, false
 	}
@@ -134,9 +134,9 @@ func (rd *RedirDns) remainingCacheTTL(query string) (time.Duration, bool) {
 // Returns (0, 0, false) when no live entry exists in the cache.
 func (rd *RedirDns) cacheTiming(query string) (maxAge, age time.Duration, ok bool) {
 	now := time.Now()
-	rd.cacheMu.RLock()
-	entry, exists := rd.cache[query]
-	rd.cacheMu.RUnlock()
+	rd.dnsCache.mu.RLock()
+	entry, exists := rd.dnsCache.entries[query]
+	rd.dnsCache.mu.RUnlock()
 	if !exists || now.After(entry.expiresAt) {
 		return 0, 0, false
 	}
@@ -148,20 +148,20 @@ func (rd *RedirDns) cacheTiming(query string) (maxAge, age time.Duration, ok boo
 // entry is read under a read lock first, then re-examined under a write lock before
 // deletion so that a concurrent writer that already refreshed the entry is not evicted.
 func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, bool) {
-	rd.cacheMu.RLock()
-	entry, ok := rd.cache[query]
-	rd.cacheMu.RUnlock()
+	rd.dnsCache.mu.RLock()
+	entry, ok := rd.dnsCache.entries[query]
+	rd.dnsCache.mu.RUnlock()
 	if !ok {
 		return nil, nil, false
 	}
 	if now.After(entry.expiresAt) {
 		// upgrade to write lock and re-check before deleting to avoid racing with
 		// a concurrent lookup that may have already stored a fresh entry
-		rd.cacheMu.Lock()
-		if current, exists := rd.cache[query]; exists && now.After(current.expiresAt) {
-			delete(rd.cache, query)
+		rd.dnsCache.mu.Lock()
+		if current, exists := rd.dnsCache.entries[query]; exists && now.After(current.expiresAt) {
+			delete(rd.dnsCache.entries, query)
 		}
-		rd.cacheMu.Unlock()
+		rd.dnsCache.mu.Unlock()
 		return nil, nil, false
 	}
 
@@ -171,12 +171,12 @@ func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, 
 // storeLookup writes entry into the cache under the write lock, evicting one existing
 // entry first if the cache is at capacity and query is not already present.
 func (rd *RedirDns) storeLookup(query string, entry dnsCacheEntry) {
-	rd.cacheMu.Lock()
-	defer rd.cacheMu.Unlock()
-	if _, exists := rd.cache[query]; !exists && len(rd.cache) >= rd.maxCacheSize {
+	rd.dnsCache.mu.Lock()
+	defer rd.dnsCache.mu.Unlock()
+	if _, exists := rd.dnsCache.entries[query]; !exists && len(rd.dnsCache.entries) >= rd.maxCacheSize {
 		rd.evictOneCacheEntry(time.Now())
 	}
-	rd.cache[query] = entry
+	rd.dnsCache.entries[query] = entry
 }
 
 // maxCNAMEDepth is the maximum number of CNAME hops the miekg lookup will
@@ -304,9 +304,9 @@ func newMiekgLookupFunc(resolvers []string, logger *zap.Logger) func(context.Con
 func (rd *RedirDns) evictOneCacheEntry(now time.Time) {
 	var soonestKey string
 	var soonestExpiry time.Time
-	for k, e := range rd.cache {
+	for k, e := range rd.dnsCache.entries {
 		if now.After(e.expiresAt) {
-			delete(rd.cache, k)
+			delete(rd.dnsCache.entries, k)
 			return
 		}
 		if soonestKey == "" || e.expiresAt.Before(soonestExpiry) {
@@ -315,7 +315,7 @@ func (rd *RedirDns) evictOneCacheEntry(now time.Time) {
 		}
 	}
 	if soonestKey != "" {
-		delete(rd.cache, soonestKey)
+		delete(rd.dnsCache.entries, soonestKey)
 	}
 }
 

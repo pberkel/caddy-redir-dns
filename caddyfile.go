@@ -54,7 +54,7 @@ func (s StringOrInt) MarshalJSON() ([]byte, error) {
 }
 
 func init() {
-	caddy.RegisterModule(&RedirDns{})
+	caddy.RegisterModule(RedirDns{})
 	httpcaddyfile.RegisterHandlerDirective("redir_dns", parseCaddyfile)
 	httpcaddyfile.RegisterDirectiveOrder("redir_dns", httpcaddyfile.After, "redir")
 }
@@ -80,9 +80,9 @@ func New() *RedirDns {
 		lookupTTL:           defaultDnsCacheTTL,
 		negativeLookupTTL:   defaultNegativeCacheTTL,
 		lookupMax:           defaultDnsLookupTimeout,
-		cache:               make(map[string]dnsCacheEntry),
+		dnsCache:            &dnsCache{entries: make(map[string]dnsCacheEntry)},
 		maxCacheSize:        defaultMaxCacheSize,
-		hostTrackers:        make(map[string]*hostTracker),
+		hostLimit:           &hostLimitState{trackers: make(map[string]*hostTracker)},
 		maxTrackedClients:   defaultMaxTrackedClients,
 		hostLimitWindow:     defaultHostLimitWindow,
 		maxHostsPerClient:   defaultMaxHostsPerClient,
@@ -91,7 +91,7 @@ func New() *RedirDns {
 }
 
 // CaddyModule returns the Caddy module information
-func (*RedirDns) CaddyModule() caddy.ModuleInfo {
+func (RedirDns) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID: "http.handlers.redir_dns",
 		New: func() caddy.Module {

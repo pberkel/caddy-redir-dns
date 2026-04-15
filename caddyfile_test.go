@@ -42,3 +42,23 @@ redir_dns {
 		t.Fatalf("unexpected trusted proxies: %#v", rd.TrustedProxies)
 	}
 }
+
+func TestUnmarshalCaddyfileRateLimitBypass(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	d := caddyfile.NewTestDispenser(`
+redir_dns {
+	rate_limit_bypass 10.0.0.0/8 172.16.0.0/12
+}
+`)
+	if err := rd.UnmarshalCaddyfile(d); err != nil {
+		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
+	}
+	if len(rd.RateLimitBypass) != 2 {
+		t.Fatalf("rate_limit_bypass length = %d, want 2", len(rd.RateLimitBypass))
+	}
+	if rd.RateLimitBypass[0] != "10.0.0.0/8" || rd.RateLimitBypass[1] != "172.16.0.0/12" {
+		t.Fatalf("unexpected rate_limit_bypass: %#v", rd.RateLimitBypass)
+	}
+}
