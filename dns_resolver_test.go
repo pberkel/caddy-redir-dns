@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
 )
 
 func TestLookupTXTCachesSuccessAndError(t *testing.T) {
@@ -157,7 +158,7 @@ func TestMiekgLookupTXTDirect(t *testing.T) {
 	})
 	addr := startTestDNSServer(t, mux)
 
-	lookupFunc := newMiekgLookupFunc([]string{addr})
+	lookupFunc := newMiekgLookupFunc([]string{addr}, zap.NewNop())
 	records, ttl, err := lookupFunc(context.Background(), "_redirect.www.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -201,7 +202,7 @@ func TestMiekgLookupTXTFollowsCNAME(t *testing.T) {
 	})
 	addr := startTestDNSServer(t, mux)
 
-	lookupFunc := newMiekgLookupFunc([]string{addr})
+	lookupFunc := newMiekgLookupFunc([]string{addr}, zap.NewNop())
 	records, ttl, err := lookupFunc(context.Background(), "_redirect.www.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -254,7 +255,7 @@ func TestMiekgLookupTXTFollowsCNAMEChain(t *testing.T) {
 	})
 	addr := startTestDNSServer(t, mux)
 
-	lookupFunc := newMiekgLookupFunc([]string{addr})
+	lookupFunc := newMiekgLookupFunc([]string{addr}, zap.NewNop())
 	records, _, err := lookupFunc(context.Background(), "_redirect.www.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -288,7 +289,7 @@ func TestMiekgLookupTXTCNAMEAndTXTInSingleResponse(t *testing.T) {
 	})
 	addr := startTestDNSServer(t, mux)
 
-	lookupFunc := newMiekgLookupFunc([]string{addr})
+	lookupFunc := newMiekgLookupFunc([]string{addr}, zap.NewNop())
 	records, ttl, err := lookupFunc(context.Background(), "_redirect.www.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -313,7 +314,7 @@ func TestMiekgLookupTXTNXDOMAIN(t *testing.T) {
 	})
 	addr := startTestDNSServer(t, mux)
 
-	lookupFunc := newMiekgLookupFunc([]string{addr})
+	lookupFunc := newMiekgLookupFunc([]string{addr}, zap.NewNop())
 	_, _, err := lookupFunc(context.Background(), "_redirect.missing.example.com")
 	if !errors.Is(err, errNoTXTRecord) {
 		t.Fatalf("expected errNoTXTRecord, got %v", err)
@@ -339,7 +340,7 @@ func TestMiekgLookupTXTCNAMELoopExceedsMaxDepth(t *testing.T) {
 	})
 	addr := startTestDNSServer(t, mux)
 
-	lookupFunc := newMiekgLookupFunc([]string{addr})
+	lookupFunc := newMiekgLookupFunc([]string{addr}, zap.NewNop())
 	_, _, err := lookupFunc(context.Background(), "loop.example.com")
 	if err == nil {
 		t.Fatal("expected error for CNAME loop, got nil")

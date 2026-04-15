@@ -103,6 +103,10 @@ type RedirDns struct {
 	// Maximum number of per-client host trackers held in memory. Default: 100000
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_TRACKED_CLIENTS}").
 	MaxTrackedClients StringOrInt `json:"max_tracked_clients,omitempty"`
+	// CIDRs or IPs that are exempt from the per-client DNS lookup rate limit.
+	// Accepts the same format as trusted_proxies (bare IPs or CIDR notation).
+	// Useful for internal health checks, load tests, or known trusted clients.
+	RateLimitBypass []string `json:"rate_limit_bypass,omitempty"`
 
 	// --- Response ---
 
@@ -159,6 +163,7 @@ type RedirDns struct {
 	hostLimitWindow   time.Duration
 	maxHostsPerClient int
 	trustedNets       []netip.Prefix
+	bypassNets        []netip.Prefix
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler. The next handler is never

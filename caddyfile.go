@@ -235,12 +235,17 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	}
 
 	if len(rd.Resolvers) > 0 {
-		rd.lookupFunc = newMiekgLookupFunc(rd.Resolvers)
+		rd.lookupFunc = newMiekgLookupFunc(rd.Resolvers, rd.logger)
 	}
 
 	rd.trustedNets, err = parseTrustedProxyPrefixes(rd.TrustedProxies)
 	if err != nil {
 		return err
+	}
+
+	rd.bypassNets, err = parseTrustedProxyPrefixes(rd.RateLimitBypass)
+	if err != nil {
+		return fmt.Errorf("rate_limit_bypass: %w", err)
 	}
 	// compile error response template — from file, literal string, or built-in default
 	if rd.ResponseTemplate != "" {
@@ -282,6 +287,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Duration("host_limit_window", rd.hostLimitWindow),
 			zap.Int("max_hosts_per_client", rd.maxHostsPerClient),
 			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
+			zap.Int("rate_limit_bypass_entries", len(rd.RateLimitBypass)),
 			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
 			zap.Bool("debug_headers", len(rd.debugKey) > 0),
@@ -356,6 +362,14 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				rd.TrustedProxies = append(rd.TrustedProxies, d.Val())
 				for d.NextArg() {
 					rd.TrustedProxies = append(rd.TrustedProxies, d.Val())
+				}
+			case "rate_limit_bypass":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.RateLimitBypass = append(rd.RateLimitBypass, d.Val())
+				for d.NextArg() {
+					rd.RateLimitBypass = append(rd.RateLimitBypass, d.Val())
 				}
 			case "resolvers":
 				if !d.NextArg() {

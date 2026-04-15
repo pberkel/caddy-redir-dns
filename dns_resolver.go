@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
 )
 
 const (
@@ -190,7 +191,7 @@ const maxCNAMEDepth = 10
 // the configured resolver returns a fully-resolved answer in a single response or
 // only the next CNAME hop. A single dns.Client is shared across all calls (it is
 // safe for concurrent use).
-func newMiekgLookupFunc(resolvers []string) func(context.Context, string) ([]string, time.Duration, error) {
+func newMiekgLookupFunc(resolvers []string, logger *zap.Logger) func(context.Context, string) ([]string, time.Duration, error) {
 	client := &dns.Client{}
 
 	// queryOnce issues a single TXT query for name. On success it returns the TXT
@@ -205,10 +206,29 @@ func newMiekgLookupFunc(resolvers []string) func(context.Context, string) ([]str
 
 		var lastErr error
 		for _, ns := range resolvers {
-			resp, _, exchErr := client.ExchangeContext(ctx, msg, ns)
+			if c := logger.Check(zap.DebugLevel, "miekg TXT query"); c != nil {
+				c.Write(zap.String("name", name), zap.String("resolver", ns))
+			}
+			resp, rtt, exchErr := client.ExchangeContext(ctx, msg, ns)
 			if exchErr != nil {
+				if c := logger.Check(zap.DebugLevel, "miekg exchange error"); c != nil {
+					c.Write(zap.String("name", name), zap.String("resolver", ns), zap.Error(exchErr))
+				}
 				lastErr = exchErr
 				continue
+			}
+			if c := logger.Check(zap.DebugLevel, "miekg TXT response"); c != nil {
+				rrTypes := make([]string, 0, len(resp.Answer))
+				for _, rr := range resp.Answer {
+					rrTypes = append(rrTypes, rr.String())
+				}
+				c.Write(
+					zap.String("name", name),
+					zap.String("resolver", ns),
+					zap.String("rcode", dns.RcodeToString[resp.Rcode]),
+					zap.Duration("rtt", rtt),
+					zap.Strings("answer", rrTypes),
+				)
 			}
 			if resp.Rcode == dns.RcodeNameError {
 				// NXDOMAIN — record does not exist; no point querying remaining servers
@@ -257,12 +277,21 @@ func newMiekgLookupFunc(resolvers []string) func(context.Context, string) ([]str
 		for depth := 0; depth < maxCNAMEDepth; depth++ {
 			records, ttl, cname, err := queryOnce(ctx, name)
 			if err != nil {
+				if c := logger.Check(zap.DebugLevel, "miekg lookup failed"); c != nil {
+					c.Write(zap.String("query", query), zap.String("name", name), zap.Int("depth", depth), zap.Error(err))
+				}
 				return nil, 0, err
 			}
 			if len(records) > 0 {
+				if c := logger.Check(zap.DebugLevel, "miekg lookup resolved"); c != nil {
+					c.Write(zap.String("query", query), zap.String("name", name), zap.Int("depth", depth), zap.Strings("records", records), zap.Duration("ttl", ttl))
+				}
 				return records, ttl, nil
 			}
 			// No TXT records but a CNAME was returned — follow the chain.
+			if c := logger.Check(zap.DebugLevel, "miekg following CNAME"); c != nil {
+				c.Write(zap.String("query", query), zap.String("from", name), zap.String("to", cname), zap.Int("depth", depth))
+			}
 			name = cname
 		}
 		return nil, 0, fmt.Errorf("CNAME chain exceeded %d hops", maxCNAMEDepth)

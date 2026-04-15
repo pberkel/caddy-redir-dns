@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.3.3 — 2026-04-15
+
+### Added
+- `rate_limit_bypass` configuration parameter accepts one or more CIDRs or bare IP addresses (same format as `trusted_proxies`) that are exempt from the per-client DNS lookup rate limit. Requests from matching clients are allowed through regardless of how many distinct hostnames they have triggered within the window. Useful for load testing, internal health checks, or other known trusted clients. The resolved client IP (after `trusted_proxies` unwrapping) is matched against the bypass list.
+- Debug logging in the miekg TXT lookup path: per-query and per-resolver entries are now emitted at `DEBUG` level, including the query name, resolver address, response rcode, RTT, full answer section, and CNAME hops followed.
+
+---
+
 ## v1.3.2 — 2026-04-14
 
 ### Added

@@ -75,6 +75,11 @@ func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now 
 	if clientID == "" {
 		return true // fail-closed: unparseable remote address
 	}
+	if len(rd.bypassNets) > 0 {
+		if addr, err := netip.ParseAddr(clientID); err == nil && rd.isRateLimitBypassed(addr) {
+			return false
+		}
+	}
 
 	rd.hostLimitMu.Lock()
 	defer rd.hostLimitMu.Unlock()
@@ -219,7 +224,16 @@ func (rd *RedirDns) isTrustedProxy(addr netip.Addr) bool {
 			return true
 		}
 	}
+	return false
+}
 
+// isRateLimitBypassed reports whether addr falls within any of the configured rate-limit bypass prefixes.
+func (rd *RedirDns) isRateLimitBypassed(addr netip.Addr) bool {
+	for _, prefix := range rd.bypassNets {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
 	return false
 }
 

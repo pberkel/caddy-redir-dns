@@ -39,6 +39,7 @@ Several optional parameters are also supported:
 		host_limit_window    1m
 		max_hosts_per_client 50
 		max_tracked_clients  100_000
+		rate_limit_bypass    10.0.0.0/8
 
 		response_template    /etc/caddy/error.html
 		http_cache_control
@@ -87,6 +88,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 | `host_limit_window` | `1m` | Sliding window over which per-client distinct-hostname DNS lookups are counted. Go duration string. |
 | `max_hosts_per_client` | `50` | Maximum distinct hostnames a single client may trigger first-time DNS lookups for within `host_limit_window`. Repeat lookups for a hostname already seen in the window are always free. Exceeding the limit falls back to `default_target` or returns `429`. |
 | `max_tracked_clients` | `100000` | Maximum number of per-client tracking entries held in memory. An existing entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
+| `rate_limit_bypass` | — | CIDRs or IPs exempt from the per-client DNS lookup rate limit. Accepts the same format as `trusted_proxies`. The resolved client IP (after `trusted_proxies` unwrapping) is matched against this list. Useful for load testing, internal health checks, or other known trusted clients. |
 
 **Response**
 
