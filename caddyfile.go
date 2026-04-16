@@ -129,6 +129,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	rd.LookupTimeout = repl.ReplaceAll(rd.LookupTimeout, "")
 	rd.CacheTTL = repl.ReplaceAll(rd.CacheTTL, "")
 	rd.NegativeCacheTTL = repl.ReplaceAll(rd.NegativeCacheTTL, "")
+	rd.StaleTTL = repl.ReplaceAll(rd.StaleTTL, "")
 	rd.HostLimitWindow = repl.ReplaceAll(rd.HostLimitWindow, "")
 	rd.StatusCode = StringOrInt(repl.ReplaceAll(string(rd.StatusCode), ""))
 	rd.MaxHostsPerClient = StringOrInt(repl.ReplaceAll(string(rd.MaxHostsPerClient), ""))
@@ -190,6 +191,14 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	}
 	if rd.negativeLookupTTL <= 0 {
 		return fmt.Errorf("negative_cache_ttl must be greater than 0")
+	}
+	if rd.StaleTTL != "" {
+		if rd.staleLookupTTL, err = time.ParseDuration(rd.StaleTTL); err != nil {
+			return fmt.Errorf("invalid stale_ttl %q: %v", rd.StaleTTL, err)
+		}
+		if rd.staleLookupTTL < 0 {
+			return fmt.Errorf("stale_ttl must not be negative")
+		}
 	}
 	if rd.hostLimitWindow, err = time.ParseDuration(rd.HostLimitWindow); err != nil {
 		return fmt.Errorf("invalid host_limit_window %q: %v", rd.HostLimitWindow, err)
@@ -282,6 +291,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Duration("lookup_timeout", rd.lookupMax),
 			zap.Duration("cache_ttl", rd.lookupTTL),
 			zap.Duration("negative_cache_ttl", rd.negativeLookupTTL),
+			zap.Duration("stale_ttl", rd.staleLookupTTL),
 			zap.Int("max_cache_size", rd.maxCacheSize),
 			zap.Int("max_tracked_clients", rd.maxTrackedClients),
 			zap.Duration("host_limit_window", rd.hostLimitWindow),
@@ -335,6 +345,11 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.NegativeCacheTTL = d.Val()
+			case "stale_ttl":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.StaleTTL = d.Val()
 			case "host_limit_window":
 				if !d.NextArg() {
 					return d.ArgErr()

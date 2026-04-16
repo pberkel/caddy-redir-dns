@@ -33,6 +33,7 @@ Several optional parameters are also supported:
 		lookup_timeout       2s
 		cache_ttl            30s
 		negative_cache_ttl   5s
+		stale_ttl            30s
 		max_cache_size       10_000
 
 		trusted_proxies      10.0.0.0/8 192.168.0.0/16
@@ -78,6 +79,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 | `lookup_timeout` | `2s` | Maximum time to wait for a DNS TXT lookup before applying fallback behaviour. Go duration string; maximum `30s`. |
 | `cache_ttl` | `30s` | Minimum time to cache successful DNS TXT results in memory. When the record's own DNS TTL is larger it is used instead, so entries are never served from cache longer than the upstream resolver intended. Go duration string. |
 | `negative_cache_ttl` | `5s` | Time to cache failed lookups (NXDOMAIN, no record found, timeout). Kept shorter than `cache_ttl` so that newly-added TXT records are discovered quickly. Go duration string. |
+| `stale_ttl` | — | How long after a cache entry expires it may still be served while a single background refresh is in flight (stale-while-revalidate). Eliminates cache-stampede bursts when many entries expire simultaneously — requests during the stale window return immediately with the old value; only one upstream lookup per key is triggered. Once `cache_ttl + stale_ttl` is exceeded the next caller blocks on a fresh lookup as normal. Disabled when absent. Go duration string. |
 | `max_cache_size` | `10000` | Maximum number of DNS TXT results held in the in-memory cache. The entry with the soonest expiry is evicted when full. |
 
 **DNS lookup guard**

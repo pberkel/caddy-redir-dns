@@ -46,74 +46,108 @@ type dnsCacheEntry struct {
 	expiresAt time.Time
 }
 
+// cacheStatus describes the outcome of a cache lookup.
+type cacheStatus int
+
+const (
+	cacheMiss  cacheStatus = iota // not found, or hard-expired (beyond stale window)
+	cacheHit                      // fresh entry returned directly
+	cacheStale                    // expired but within stale_ttl window; background refresh triggered
+)
+
 // lookupTXT returns the DNS TXT records for query, serving from the in-memory cache
 // when a fresh entry exists. Concurrent requests for the same query are coalesced by
 // singleflight so that only one upstream DNS lookup is issued regardless of how many
 // requests arrive simultaneously. The returned bool is true when the result was served
 // directly from the outer cache (i.e. no upstream lookup was triggered by this call).
+//
+// When stale_ttl is configured and an expired entry is within the stale window, the
+// stale result is returned immediately and a background refresh is scheduled via
+// DoChan so that at most one upstream lookup is in flight per key.
 func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 	now := time.Now()
-	if txt, err, found := rd.cachedLookup(query, now); found {
+	txt, err, status := rd.cachedLookup(query, now)
+	switch status {
+	case cacheHit:
 		return txt, err, true
+	case cacheStale:
+		// Serve stale immediately and kick off a background refresh.
+		// DoChan deduplicates: if a refresh is already in flight for this key
+		// (from a previous stale hit or a concurrent foreground miss), the
+		// existing call is reused and no additional upstream lookup is issued.
+		ch := rd.dnsCache.group.DoChan(query, func() (any, error) {
+			return rd.doLookupAndStore(query), nil
+		})
+		go func() { <-ch }()
+		return txt, err, true
+	default: // cacheMiss
+		// Synchronous path — block until a fresh result is available.
+		value, _, _ := rd.dnsCache.group.Do(query, func() (any, error) {
+			// re-check the cache inside the singleflight closure: a previous call
+			// for the same key may have populated it between the outer cache miss
+			// and acquiring the singleflight slot; only a fresh hit short-circuits
+			checkNow := time.Now()
+			if txt2, err2, s := rd.cachedLookup(query, checkNow); s == cacheHit {
+				return dnsCacheEntry{txt: txt2, err: err2}, nil
+			}
+			return rd.doLookupAndStore(query), nil
+		})
+		// two-value assertion: if the singleflight call returned a zero value (e.g.
+		// due to an unexpected panic in a concurrent caller), entry is the zero
+		// dnsCacheEntry which is treated as a cache miss rather than crashing
+		entry, _ := value.(dnsCacheEntry)
+		return append([]string(nil), entry.txt...), entry.err, false
+	}
+}
+
+// doLookupAndStore performs a single upstream DNS TXT lookup for query, stores the
+// result in the cache, and returns the resulting cache entry. DNS errors are embedded
+// in the returned entry rather than returned as a separate error value, so the caller
+// can safely store any outcome without special-casing the error path.
+//
+// DNS lookups run on context.Background() with a fixed timeout, deliberately decoupled
+// from the request context so that cancellation of one caller's request does not abort
+// the lookup for all other waiting callers.
+func (rd *RedirDns) doLookupAndStore(query string) dnsCacheEntry {
+	now := time.Now()
+	lookupCtx, cancel := context.WithTimeout(context.Background(), rd.lookupMax)
+	defer cancel()
+
+	var (
+		txt    []string
+		dnsTTL time.Duration
+		err    error
+	)
+	if rd.lookupFunc != nil {
+		txt, dnsTTL, err = rd.lookupFunc(lookupCtx, query)
+	} else {
+		txt, err = rd.resolver.LookupTXT(lookupCtx, query)
+		// net.Resolver does not expose TTL; dnsTTL remains 0 so the
+		// configured cache_ttl is used unchanged
+	}
+	if err == nil && len(txt) == 0 {
+		err = errNoTXTRecord
 	}
 
-	value, _, _ := rd.dnsCache.group.Do(query, func() (any, error) {
-		// re-check the cache inside the singleflight closure: a previous call for the
-		// same key may have populated it between the outer cache miss and acquiring the
-		// singleflight slot
-		checkNow := time.Now()
-		if txt, err, found := rd.cachedLookup(query, checkNow); found {
-			return dnsCacheEntry{txt: txt, err: err}, nil
+	// failed lookups use the (shorter) negative cache TTL; successful lookups
+	// honour the DNS record TTL when it is larger than the configured cache TTL
+	var cacheTTL time.Duration
+	if err != nil {
+		cacheTTL = rd.negativeLookupTTL
+	} else {
+		cacheTTL = rd.lookupTTL
+		if dnsTTL > cacheTTL {
+			cacheTTL = dnsTTL
 		}
-
-		// DNS lookups run on context.Background() with a fixed timeout, deliberately
-		// decoupled from the request context so that cancellation of one caller's
-		// request does not abort the lookup for all other waiting callers
-		lookupCtx, cancel := context.WithTimeout(context.Background(), rd.lookupMax)
-		defer cancel()
-		var (
-			txt    []string
-			dnsTTL time.Duration
-			err    error
-		)
-		if rd.lookupFunc != nil {
-			txt, dnsTTL, err = rd.lookupFunc(lookupCtx, query)
-		} else {
-			txt, err = rd.resolver.LookupTXT(lookupCtx, query)
-			// net.Resolver does not expose TTL; dnsTTL remains 0 so the
-			// configured cache_ttl is used unchanged
-		}
-		if err == nil && len(txt) == 0 {
-			err = errNoTXTRecord
-		}
-
-		// failed lookups use the (shorter) negative cache TTL; successful lookups
-		// honour the DNS record TTL when it is larger than the configured cache TTL
-		var cacheTTL time.Duration
-		if err != nil {
-			cacheTTL = rd.negativeLookupTTL
-		} else {
-			cacheTTL = rd.lookupTTL
-			if dnsTTL > cacheTTL {
-				cacheTTL = dnsTTL
-			}
-		}
-		entry := dnsCacheEntry{
-			txt:       txt, // fresh slice from lookupFunc/resolver; copied on read in cachedLookup and on return below
-			err:       err,
-			cachedAt:  checkNow,
-			expiresAt: checkNow.Add(cacheTTL),
-		}
-		rd.storeLookup(query, entry)
-
-		return entry, nil
-	})
-
-	// two-value assertion: if the singleflight call returned a zero value (e.g. due
-	// to an unexpected panic in a concurrent caller), entry is the zero dnsCacheEntry
-	// which is treated as a cache miss rather than crashing the server
-	entry, _ := value.(dnsCacheEntry)
-	return append([]string(nil), entry.txt...), entry.err, false
+	}
+	entry := dnsCacheEntry{
+		txt:       txt, // fresh slice from lookupFunc/resolver; copied on read in cachedLookup and on return below
+		err:       err,
+		cachedAt:  now,
+		expiresAt: now.Add(cacheTTL),
+	}
+	rd.storeLookup(query, entry)
+	return entry
 }
 
 // remainingCacheTTL returns the time until the cached entry for query expires.
@@ -143,29 +177,39 @@ func (rd *RedirDns) cacheTiming(query string) (maxAge, age time.Duration, ok boo
 	return entry.expiresAt.Sub(entry.cachedAt), now.Sub(entry.cachedAt), true
 }
 
-// cachedLookup returns the cached TXT records for query if a non-expired entry exists.
-// Expired entries are removed under a write lock using a double-checked pattern: the
-// entry is read under a read lock first, then re-examined under a write lock before
-// deletion so that a concurrent writer that already refreshed the entry is not evicted.
-func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, bool) {
+// cachedLookup returns the cached TXT records for query along with a cacheStatus:
+//   - cacheHit:   a fresh (non-expired) entry exists and is returned.
+//   - cacheStale: the entry has expired but is within the stale_ttl window; the
+//     stale data is returned so it can be served immediately while a background
+//     refresh is triggered by the caller.
+//   - cacheMiss:  no entry exists, or the entry is beyond the hard expiry boundary
+//     (expiresAt + staleLookupTTL). Hard-expired entries are deleted under a write
+//     lock using a double-checked pattern to avoid racing with a concurrent writer
+//     that may have already stored a fresh entry.
+func (rd *RedirDns) cachedLookup(query string, now time.Time) ([]string, error, cacheStatus) {
 	rd.dnsCache.mu.RLock()
 	entry, ok := rd.dnsCache.entries[query]
 	rd.dnsCache.mu.RUnlock()
 	if !ok {
-		return nil, nil, false
+		return nil, nil, cacheMiss
 	}
-	if now.After(entry.expiresAt) {
-		// upgrade to write lock and re-check before deleting to avoid racing with
-		// a concurrent lookup that may have already stored a fresh entry
-		rd.dnsCache.mu.Lock()
-		if current, exists := rd.dnsCache.entries[query]; exists && now.After(current.expiresAt) {
-			delete(rd.dnsCache.entries, query)
-		}
-		rd.dnsCache.mu.Unlock()
-		return nil, nil, false
+	if !now.After(entry.expiresAt) {
+		return append([]string(nil), entry.txt...), entry.err, cacheHit
 	}
 
-	return append([]string(nil), entry.txt...), entry.err, true
+	// Entry is expired. Check whether it is within the stale window.
+	if rd.staleLookupTTL > 0 && now.Before(entry.expiresAt.Add(rd.staleLookupTTL)) {
+		return append([]string(nil), entry.txt...), entry.err, cacheStale
+	}
+
+	// Hard expired — upgrade to write lock and re-check before deleting to avoid
+	// racing with a concurrent writer that may have already stored a fresh entry.
+	rd.dnsCache.mu.Lock()
+	if current, exists := rd.dnsCache.entries[query]; exists && !now.Before(current.expiresAt.Add(rd.staleLookupTTL)) {
+		delete(rd.dnsCache.entries, query)
+	}
+	rd.dnsCache.mu.Unlock()
+	return nil, nil, cacheMiss
 }
 
 // storeLookup writes entry into the cache under the write lock, evicting one existing

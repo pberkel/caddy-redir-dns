@@ -43,6 +43,23 @@ redir_dns {
 	}
 }
 
+func TestUnmarshalCaddyfileStaleTTL(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	d := caddyfile.NewTestDispenser(`
+redir_dns {
+	stale_ttl 60s
+}
+`)
+	if err := rd.UnmarshalCaddyfile(d); err != nil {
+		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
+	}
+	if rd.StaleTTL != "60s" {
+		t.Fatalf("stale_ttl = %q, want %q", rd.StaleTTL, "60s")
+	}
+}
+
 func TestUnmarshalCaddyfileRateLimitBypass(t *testing.T) {
 	t.Parallel()
 

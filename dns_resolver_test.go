@@ -381,6 +381,118 @@ func TestLookupTXTRespectsMaxCacheSize(t *testing.T) {
 	}
 }
 
+func TestLookupTXTStaleWhileRevalidate(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	rd.lookupTTL = 10 * time.Millisecond   // short TTL so the entry expires quickly
+	rd.staleLookupTTL = 50 * time.Millisecond // stale window after expiry
+
+	var calls atomic.Int64
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
+		calls.Add(1)
+		return []string{"https://example.com"}, 0, nil
+	}
+
+	// Prime the cache with a fresh entry.
+	txt, err, cached := rd.lookupTXT("_redirdns.stale.example.com")
+	if err != nil || len(txt) == 0 || cached {
+		t.Fatalf("first lookup: txt=%v err=%v cached=%v", txt, err, cached)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected 1 lookup after prime, got %d", calls.Load())
+	}
+
+	// Wait for the entry to expire but stay within the stale window.
+	time.Sleep(20 * time.Millisecond)
+
+	// This lookup should return stale data immediately (cached=true) and
+	// trigger a background refresh.
+	txt2, err2, cached2 := rd.lookupTXT("_redirdns.stale.example.com")
+	if err2 != nil {
+		t.Fatalf("stale lookup returned error: %v", err2)
+	}
+	if len(txt2) == 0 || txt2[0] != "https://example.com" {
+		t.Fatalf("stale lookup returned unexpected txt: %v", txt2)
+	}
+	if !cached2 {
+		t.Fatal("stale lookup should report cached=true")
+	}
+
+	// Allow time for the background refresh to complete.
+	time.Sleep(20 * time.Millisecond)
+
+	if calls.Load() != 2 {
+		t.Fatalf("expected 2 total lookups after stale refresh, got %d", calls.Load())
+	}
+}
+
+func TestLookupTXTStaleWindowExpiredForcesSync(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	rd.lookupTTL = 10 * time.Millisecond  // short TTL
+	rd.staleLookupTTL = 10 * time.Millisecond // very short stale window
+
+	var calls atomic.Int64
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
+		calls.Add(1)
+		return []string{"https://example.com"}, 0, nil
+	}
+
+	// Prime the cache.
+	if _, _, cached := rd.lookupTXT("_redirdns.hardexpiry.example.com"); cached {
+		t.Fatal("first lookup should not be cached")
+	}
+
+	// Wait beyond both TTL and stale window (hard expiry).
+	time.Sleep(30 * time.Millisecond)
+
+	// The entry is now past the hard expiry boundary — should trigger a synchronous
+	// lookup and not return the old stale value.
+	_, err, cached := rd.lookupTXT("_redirdns.hardexpiry.example.com")
+	if err != nil {
+		t.Fatalf("hard-expired lookup returned error: %v", err)
+	}
+	if cached {
+		t.Fatal("hard-expired lookup should not report cached=true")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected 2 total lookups after hard expiry, got %d", calls.Load())
+	}
+}
+
+func TestLookupTXTStaleTTLDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	// staleLookupTTL=0 (default) must not serve stale data; expired entries trigger
+	// a synchronous lookup immediately.
+	rd := New()
+	rd.lookupTTL = 10 * time.Millisecond
+	// staleLookupTTL left at zero (default)
+
+	var calls atomic.Int64
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
+		calls.Add(1)
+		return []string{"https://example.com"}, 0, nil
+	}
+
+	// Prime.
+	rd.lookupTXT("_redirdns.nostale.example.com") //nolint:errcheck
+
+	// Expire.
+	time.Sleep(20 * time.Millisecond)
+
+	// Must go synchronous (cached=false).
+	_, _, cached := rd.lookupTXT("_redirdns.nostale.example.com")
+	if cached {
+		t.Fatal("with stale_ttl disabled, expired entry should not report cached=true")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected 2 lookups without stale_ttl, got %d", calls.Load())
+	}
+}
+
 func TestClassifyLookupError(t *testing.T) {
 	t.Parallel()
 

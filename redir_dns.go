@@ -85,6 +85,14 @@ type RedirDns struct {
 	// cache_ttl so that newly-added TXT records are discovered quickly. Default: 5s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.NEGATIVE_CACHE_TTL}").
 	NegativeCacheTTL string `json:"negative_cache_ttl,omitempty"`
+	// How long after a cache entry expires it may still be served while a background
+	// refresh is in flight (stale-while-revalidate). When set, an expired entry is
+	// returned immediately and a single upstream lookup is triggered in the background
+	// rather than blocking the request. Requests arriving after the entry is fully
+	// refreshed receive the fresh value. Default: "" (disabled — expired entries block
+	// until a fresh result is available).
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.STALE_TTL}").
+	StaleTTL string `json:"stale_ttl,omitempty"`
 	// Maximum number of DNS TXT records held in the in-memory cache. Default: 10000
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CACHE_SIZE}").
 	MaxCacheSize StringOrInt `json:"max_cache_size,omitempty"`
@@ -149,6 +157,7 @@ type RedirDns struct {
 	resolver          *net.Resolver
 	lookupTTL         time.Duration
 	negativeLookupTTL time.Duration
+	staleLookupTTL    time.Duration
 	lookupMax         time.Duration
 	lookupFunc        func(context.Context, string) ([]string, time.Duration, error) // overridden in tests
 	dnsCache          *dnsCache
