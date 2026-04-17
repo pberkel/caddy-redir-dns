@@ -78,11 +78,20 @@ type RedirDns struct {
 	// Maximum time to wait for DNS TXT lookups before falling back. Default: 2s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.LOOKUP_TIMEOUT}").
 	LookupTimeout string `json:"lookup_timeout,omitempty"`
-	// TTL for in-memory DNS TXT lookup cache entries. Default: 30s
-	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.CACHE_TTL}").
-	CacheTTL string `json:"cache_ttl,omitempty"`
+	// TTL for in-memory DNS TXT lookup cache entries. When no custom resolvers are
+	// configured, the system resolver is used and does not expose DNS record TTLs —
+	// this value is used directly as the cache TTL. When custom resolvers are
+	// configured and the DNS record returns a TTL, the larger of the two is used,
+	// up to max_cache_ttl. Default: 30s
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.MIN_CACHE_TTL}").
+	MinCacheTTL string `json:"min_cache_ttl,omitempty"`
+	// Maximum TTL for in-memory DNS TXT lookup cache entries. Caps the TTL honoured
+	// from the DNS record so that a long-lived record does not prevent the cache from
+	// reflecting updates within a reasonable time. Must be >= min_cache_ttl. Default: 1h
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.MAX_CACHE_TTL}").
+	MaxCacheTTL string `json:"max_cache_ttl,omitempty"`
 	// TTL applied to failed lookups (NXDOMAIN, no record, timeout). Kept shorter than
-	// cache_ttl so that newly-added TXT records are discovered quickly. Default: 5s
+	// min_cache_ttl so that newly-added TXT records are discovered quickly. Default: 5s
 	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.NEGATIVE_CACHE_TTL}").
 	NegativeCacheTTL string `json:"negative_cache_ttl,omitempty"`
 	// How long after a cache entry expires it may still be served while a background
@@ -91,26 +100,27 @@ type RedirDns struct {
 	// rather than blocking the request. Requests arriving after the entry is fully
 	// refreshed receive the fresh value. Default: "" (disabled — expired entries block
 	// until a fresh result is available).
-	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.STALE_TTL}").
-	StaleTTL string `json:"stale_ttl,omitempty"`
+	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.STALE_CACHE_TTL}").
+	StaleCacheTTL string `json:"stale_cache_ttl,omitempty"`
 	// Maximum number of DNS TXT records held in the in-memory cache. Default: 10000
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CACHE_SIZE}").
 	MaxCacheSize StringOrInt `json:"max_cache_size,omitempty"`
 
 	// --- DNS lookup guard ---
 
+	// Per-client rate limit: maximum distinct hostnames a single IP may trigger
+	// first-time DNS lookups for within the sliding window. Takes two positional
+	// arguments: <limit> <duration> (e.g. "50 1m"). Repeat lookups for a hostname
+	// already seen within the window are always free. Exceeding the limit falls back
+	// to default_target or returns 429. Default: 50 1m.
+	// Both values accept Caddy global placeholders (e.g. "{env.PER_IP_LIMIT}").
+	PerIPRateLimit *PerIPRateLimit `json:"per_ip_rate_limit,omitempty"`
+	// Maximum number of per-IP trackers held in memory. An arbitrary entry is evicted
+	// when the cap is reached, preventing unbounded growth under rotating-IP traffic.
+	// Default: 100000. Accepts a bare integer or a quoted string (e.g. "{env.MAX_TRACKED_IPS}").
+	MaxTrackedIPs StringOrInt `json:"max_tracked_ips,omitempty"`
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
-	// Sliding window for per-client DNS lookup host tracking. Default: 1m
-	// Accepts a Go duration string or a Caddy placeholder (e.g. "{env.HOST_LIMIT_WINDOW}").
-	HostLimitWindow string `json:"host_limit_window,omitempty"`
-	// Maximum distinct hostnames a single client may trigger DNS lookups for within
-	// host_limit_window before further new-hostname lookups are skipped. Default: 50
-	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_HOSTS_PER_CLIENT}").
-	MaxHostsPerClient StringOrInt `json:"max_hosts_per_client,omitempty"`
-	// Maximum number of per-client host trackers held in memory. Default: 100000
-	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_TRACKED_CLIENTS}").
-	MaxTrackedClients StringOrInt `json:"max_tracked_clients,omitempty"`
 	// CIDRs or IPs that are exempt from the per-client DNS lookup rate limit.
 	// Accepts the same format as trusted_proxies (bare IPs or CIDR notation).
 	// Useful for internal health checks, load tests, or known trusted clients.
@@ -156,6 +166,7 @@ type RedirDns struct {
 	// DNS lookup
 	resolver          *net.Resolver
 	lookupTTL         time.Duration
+	maxLookupTTL      time.Duration
 	negativeLookupTTL time.Duration
 	staleLookupTTL    time.Duration
 	lookupMax         time.Duration
@@ -180,6 +191,16 @@ type dnsCache struct {
 	mu      sync.RWMutex
 	entries map[string]dnsCacheEntry
 	group   singleflight.Group
+}
+
+// PerIPRateLimit defines the per-client distinct-hostname DNS lookup rate limit.
+// It mirrors the RateLimit type in caddy-tls-issuer-rate-limit: two fields, same
+// positional Caddyfile syntax (<limit> <duration>).
+type PerIPRateLimit struct {
+	// Maximum distinct hostnames per client within Duration. Default: 50
+	Limit StringOrInt `json:"limit,omitempty"`
+	// Sliding window duration. Default: 1m
+	Duration string `json:"duration,omitempty"`
 }
 
 // hostLimitState holds the per-client hostname tracker map and its mutex.

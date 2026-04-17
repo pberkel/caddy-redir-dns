@@ -6,16 +6,15 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
 
-func TestUnmarshalCaddyfileParsesLookupTimeoutAndCacheTTL(t *testing.T) {
+func TestUnmarshalCaddyfileParsesLookupTimeoutAndMinCacheTTL(t *testing.T) {
 	t.Parallel()
 
 	rd := New()
 	d := caddyfile.NewTestDispenser(`
 redir_dns {
 	lookup_timeout 750ms
-	cache_ttl 45s
-	host_limit_window 90s
-	max_hosts_per_client 77
+	min_cache_ttl 45s
+	per_ip_rate_limit 77 90s
 	trusted_proxies 10.0.0.0/8 192.168.0.0/16
 }
 `)
@@ -26,14 +25,17 @@ redir_dns {
 	if rd.LookupTimeout != "750ms" {
 		t.Fatalf("lookup timeout = %q, want %q", rd.LookupTimeout, "750ms")
 	}
-	if rd.CacheTTL != "45s" {
-		t.Fatalf("cache ttl = %q, want %q", rd.CacheTTL, "45s")
+	if rd.MinCacheTTL != "45s" {
+		t.Fatalf("min_cache_ttl = %q, want %q", rd.MinCacheTTL, "45s")
 	}
-	if rd.HostLimitWindow != "90s" {
-		t.Fatalf("host limit window = %q, want %q", rd.HostLimitWindow, "90s")
+	if rd.PerIPRateLimit == nil {
+		t.Fatal("per_ip_rate_limit should not be nil")
 	}
-	if rd.MaxHostsPerClient != "77" {
-		t.Fatalf("max hosts per client = %q, want %q", rd.MaxHostsPerClient, "77")
+	if rd.PerIPRateLimit.Duration != "90s" {
+		t.Fatalf("per_ip_rate_limit duration = %q, want %q", rd.PerIPRateLimit.Duration, "90s")
+	}
+	if rd.PerIPRateLimit.Limit != "77" {
+		t.Fatalf("per_ip_rate_limit limit = %q, want %q", rd.PerIPRateLimit.Limit, "77")
 	}
 	if len(rd.TrustedProxies) != 2 {
 		t.Fatalf("trusted proxies length = %d, want %d", len(rd.TrustedProxies), 2)
@@ -43,20 +45,41 @@ redir_dns {
 	}
 }
 
-func TestUnmarshalCaddyfileStaleTTL(t *testing.T) {
+func TestUnmarshalCaddyfileMaxCacheTTL(t *testing.T) {
 	t.Parallel()
 
 	rd := New()
 	d := caddyfile.NewTestDispenser(`
 redir_dns {
-	stale_ttl 60s
+	min_cache_ttl 30s
+	max_cache_ttl 2h
 }
 `)
 	if err := rd.UnmarshalCaddyfile(d); err != nil {
 		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
 	}
-	if rd.StaleTTL != "60s" {
-		t.Fatalf("stale_ttl = %q, want %q", rd.StaleTTL, "60s")
+	if rd.MinCacheTTL != "30s" {
+		t.Fatalf("min_cache_ttl = %q, want %q", rd.MinCacheTTL, "30s")
+	}
+	if rd.MaxCacheTTL != "2h" {
+		t.Fatalf("max_cache_ttl = %q, want %q", rd.MaxCacheTTL, "2h")
+	}
+}
+
+func TestUnmarshalCaddyfileStaleCacheTTL(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	d := caddyfile.NewTestDispenser(`
+redir_dns {
+	stale_cache_ttl 60s
+}
+`)
+	if err := rd.UnmarshalCaddyfile(d); err != nil {
+		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
+	}
+	if rd.StaleCacheTTL != "60s" {
+		t.Fatalf("stale_cache_ttl = %q, want %q", rd.StaleCacheTTL, "60s")
 	}
 }
 

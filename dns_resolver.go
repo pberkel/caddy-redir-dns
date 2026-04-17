@@ -21,8 +21,11 @@ const (
 	// since lookups run on context.Background() and are not bounded by request lifetime
 	maxLookupTimeout = 30 * time.Second
 
-	// Default DNS TXT cache TTL
-	defaultDnsCacheTTL = 30 * time.Second
+	// Default minimum DNS TXT cache TTL
+	defaultMinCacheTTL = 30 * time.Second
+
+	// Default maximum DNS TXT cache TTL — caps the TTL honoured from the DNS record
+	defaultMaxCacheTTL = time.Hour
 
 	// Default DNS TXT negative cache TTL (applied to failed/NXDOMAIN lookups)
 	defaultNegativeCacheTTL = 5 * time.Second
@@ -52,7 +55,7 @@ type cacheStatus int
 const (
 	cacheMiss  cacheStatus = iota // not found, or hard-expired (beyond stale window)
 	cacheHit                      // fresh entry returned directly
-	cacheStale                    // expired but within stale_ttl window; background refresh triggered
+	cacheStale                    // expired but within stale_cache_ttl window; background refresh triggered
 )
 
 // lookupTXT returns the DNS TXT records for query, serving from the in-memory cache
@@ -61,7 +64,7 @@ const (
 // requests arrive simultaneously. The returned bool is true when the result was served
 // directly from the outer cache (i.e. no upstream lookup was triggered by this call).
 //
-// When stale_ttl is configured and an expired entry is within the stale window, the
+// When stale_cache_ttl is configured and an expired entry is within the stale window, the
 // stale result is returned immediately and a background refresh is scheduled via
 // DoChan so that at most one upstream lookup is in flight per key.
 func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
@@ -123,7 +126,7 @@ func (rd *RedirDns) doLookupAndStore(query string) dnsCacheEntry {
 	} else {
 		txt, err = rd.resolver.LookupTXT(lookupCtx, query)
 		// net.Resolver does not expose TTL; dnsTTL remains 0 so the
-		// configured cache_ttl is used unchanged
+		// configured min_cache_ttl is used unchanged
 	}
 	if err == nil && len(txt) == 0 {
 		err = errNoTXTRecord
@@ -138,6 +141,9 @@ func (rd *RedirDns) doLookupAndStore(query string) dnsCacheEntry {
 		cacheTTL = rd.lookupTTL
 		if dnsTTL > cacheTTL {
 			cacheTTL = dnsTTL
+		}
+		if cacheTTL > rd.maxLookupTTL {
+			cacheTTL = rd.maxLookupTTL
 		}
 	}
 	entry := dnsCacheEntry{
@@ -179,7 +185,7 @@ func (rd *RedirDns) cacheTiming(query string) (maxAge, age time.Duration, ok boo
 
 // cachedLookup returns the cached TXT records for query along with a cacheStatus:
 //   - cacheHit:   a fresh (non-expired) entry exists and is returned.
-//   - cacheStale: the entry has expired but is within the stale_ttl window; the
+//   - cacheStale: the entry has expired but is within the stale_cache_ttl window; the
 //     stale data is returned so it can be served immediately while a background
 //     refresh is triggered by the caller.
 //   - cacheMiss:  no entry exists, or the entry is beyond the hard expiry boundary

@@ -65,25 +65,29 @@ func init() {
 // (e.g. in tests).
 func New() *RedirDns {
 	rd := RedirDns{
-		DnsPrefix:           defaultDnsPrefix,
-		StatusCode:          "temporary",
-		LookupTimeout:       defaultDnsLookupTimeout.String(),
-		CacheTTL:            defaultDnsCacheTTL.String(),
-		NegativeCacheTTL:    defaultNegativeCacheTTL.String(),
-		HostLimitWindow:     defaultHostLimitWindow.String(),
-		MaxHostsPerClient:   StringOrInt(strconv.Itoa(defaultMaxHostsPerClient)),
+		DnsPrefix:        defaultDnsPrefix,
+		StatusCode:       "temporary",
+		LookupTimeout:    defaultDnsLookupTimeout.String(),
+		MinCacheTTL:      defaultMinCacheTTL.String(),
+		MaxCacheTTL:      defaultMaxCacheTTL.String(),
+		NegativeCacheTTL: defaultNegativeCacheTTL.String(),
+		PerIPRateLimit: &PerIPRateLimit{
+			Limit:    StringOrInt(strconv.Itoa(defaultMaxHostsPerClient)),
+			Duration: defaultHostLimitWindow.String(),
+		},
+		MaxTrackedIPs:       StringOrInt(strconv.Itoa(defaultMaxTrackedIPs)),
 		MaxCacheSize:        StringOrInt(strconv.Itoa(defaultMaxCacheSize)),
-		MaxTrackedClients:   StringOrInt(strconv.Itoa(defaultMaxTrackedClients)),
 		resolver:            net.DefaultResolver,
 		statusCodeAuto:      true,
 		statusCodePermanent: false,
-		lookupTTL:           defaultDnsCacheTTL,
+		lookupTTL:           defaultMinCacheTTL,
+		maxLookupTTL:        defaultMaxCacheTTL,
 		negativeLookupTTL:   defaultNegativeCacheTTL,
 		lookupMax:           defaultDnsLookupTimeout,
 		dnsCache:            &dnsCache{entries: make(map[string]dnsCacheEntry)},
 		maxCacheSize:        defaultMaxCacheSize,
 		hostLimit:           &hostLimitState{trackers: make(map[string]*hostTracker)},
-		maxTrackedClients:   defaultMaxTrackedClients,
+		maxTrackedClients:   defaultMaxTrackedIPs,
 		hostLimitWindow:     defaultHostLimitWindow,
 		maxHostsPerClient:   defaultMaxHostsPerClient,
 	}
@@ -127,14 +131,21 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	rd.DefaultTarget = repl.ReplaceAll(rd.DefaultTarget, "")
 	rd.DnsPrefix = repl.ReplaceAll(rd.DnsPrefix, "")
 	rd.LookupTimeout = repl.ReplaceAll(rd.LookupTimeout, "")
-	rd.CacheTTL = repl.ReplaceAll(rd.CacheTTL, "")
+	rd.MinCacheTTL = repl.ReplaceAll(rd.MinCacheTTL, "")
+	rd.MaxCacheTTL = repl.ReplaceAll(rd.MaxCacheTTL, "")
 	rd.NegativeCacheTTL = repl.ReplaceAll(rd.NegativeCacheTTL, "")
-	rd.StaleTTL = repl.ReplaceAll(rd.StaleTTL, "")
-	rd.HostLimitWindow = repl.ReplaceAll(rd.HostLimitWindow, "")
+	rd.StaleCacheTTL = repl.ReplaceAll(rd.StaleCacheTTL, "")
+	if rd.PerIPRateLimit == nil {
+		rd.PerIPRateLimit = &PerIPRateLimit{
+			Limit:    StringOrInt(strconv.Itoa(defaultMaxHostsPerClient)),
+			Duration: defaultHostLimitWindow.String(),
+		}
+	}
+	rd.PerIPRateLimit.Duration = repl.ReplaceAll(rd.PerIPRateLimit.Duration, "")
+	rd.PerIPRateLimit.Limit = StringOrInt(repl.ReplaceAll(string(rd.PerIPRateLimit.Limit), ""))
 	rd.StatusCode = StringOrInt(repl.ReplaceAll(string(rd.StatusCode), ""))
-	rd.MaxHostsPerClient = StringOrInt(repl.ReplaceAll(string(rd.MaxHostsPerClient), ""))
+	rd.MaxTrackedIPs = StringOrInt(repl.ReplaceAll(string(rd.MaxTrackedIPs), ""))
 	rd.MaxCacheSize = StringOrInt(repl.ReplaceAll(string(rd.MaxCacheSize), ""))
-	rd.MaxTrackedClients = StringOrInt(repl.ReplaceAll(string(rd.MaxTrackedClients), ""))
 	for i, p := range rd.TrustedProxies {
 		rd.TrustedProxies[i] = repl.ReplaceAll(p, "")
 	}
@@ -180,11 +191,20 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	if rd.lookupMax > maxLookupTimeout {
 		return fmt.Errorf("lookup_timeout must not exceed %s", maxLookupTimeout)
 	}
-	if rd.lookupTTL, err = time.ParseDuration(rd.CacheTTL); err != nil {
-		return fmt.Errorf("invalid cache_ttl %q: %v", rd.CacheTTL, err)
+	if rd.lookupTTL, err = time.ParseDuration(rd.MinCacheTTL); err != nil {
+		return fmt.Errorf("invalid min_cache_ttl %q: %v", rd.MinCacheTTL, err)
 	}
 	if rd.lookupTTL <= 0 {
-		return fmt.Errorf("cache_ttl must be greater than 0")
+		return fmt.Errorf("min_cache_ttl must be greater than 0")
+	}
+	if rd.maxLookupTTL, err = time.ParseDuration(rd.MaxCacheTTL); err != nil {
+		return fmt.Errorf("invalid max_cache_ttl %q: %v", rd.MaxCacheTTL, err)
+	}
+	if rd.maxLookupTTL <= 0 {
+		return fmt.Errorf("max_cache_ttl must be greater than 0")
+	}
+	if rd.maxLookupTTL < rd.lookupTTL {
+		return fmt.Errorf("max_cache_ttl (%s) must not be less than min_cache_ttl (%s)", rd.MaxCacheTTL, rd.MinCacheTTL)
 	}
 	if rd.negativeLookupTTL, err = time.ParseDuration(rd.NegativeCacheTTL); err != nil {
 		return fmt.Errorf("invalid negative_cache_ttl %q: %v", rd.NegativeCacheTTL, err)
@@ -192,19 +212,19 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	if rd.negativeLookupTTL <= 0 {
 		return fmt.Errorf("negative_cache_ttl must be greater than 0")
 	}
-	if rd.StaleTTL != "" {
-		if rd.staleLookupTTL, err = time.ParseDuration(rd.StaleTTL); err != nil {
-			return fmt.Errorf("invalid stale_ttl %q: %v", rd.StaleTTL, err)
+	if rd.StaleCacheTTL != "" {
+		if rd.staleLookupTTL, err = time.ParseDuration(rd.StaleCacheTTL); err != nil {
+			return fmt.Errorf("invalid stale_cache_ttl %q: %v", rd.StaleCacheTTL, err)
 		}
 		if rd.staleLookupTTL < 0 {
-			return fmt.Errorf("stale_ttl must not be negative")
+			return fmt.Errorf("stale_cache_ttl must not be negative")
 		}
 	}
-	if rd.hostLimitWindow, err = time.ParseDuration(rd.HostLimitWindow); err != nil {
-		return fmt.Errorf("invalid host_limit_window %q: %v", rd.HostLimitWindow, err)
+	if rd.hostLimitWindow, err = time.ParseDuration(rd.PerIPRateLimit.Duration); err != nil {
+		return fmt.Errorf("invalid per_ip_rate_limit duration %q: %v", rd.PerIPRateLimit.Duration, err)
 	}
 	if rd.hostLimitWindow <= 0 {
-		return fmt.Errorf("host_limit_window must be greater than 0")
+		return fmt.Errorf("per_ip_rate_limit duration must be greater than 0")
 	}
 
 	// parse and validate int fields
@@ -224,11 +244,11 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		}
 		rd.statusCodeAuto = false
 	}
-	if rd.maxHostsPerClient, err = strconv.Atoi(string(rd.MaxHostsPerClient)); err != nil {
-		return fmt.Errorf("invalid max_hosts_per_client %q: %v", rd.MaxHostsPerClient, err)
+	if rd.maxHostsPerClient, err = strconv.Atoi(string(rd.PerIPRateLimit.Limit)); err != nil {
+		return fmt.Errorf("invalid per_ip_rate_limit limit %q: %v", rd.PerIPRateLimit.Limit, err)
 	}
 	if rd.maxHostsPerClient <= 0 {
-		return fmt.Errorf("max_hosts_per_client must be greater than 0")
+		return fmt.Errorf("per_ip_rate_limit limit must be greater than 0")
 	}
 	if rd.maxCacheSize, err = strconv.Atoi(string(rd.MaxCacheSize)); err != nil {
 		return fmt.Errorf("invalid max_cache_size %q: %v", rd.MaxCacheSize, err)
@@ -236,11 +256,11 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	if rd.maxCacheSize <= 0 {
 		return fmt.Errorf("max_cache_size must be greater than 0")
 	}
-	if rd.maxTrackedClients, err = strconv.Atoi(string(rd.MaxTrackedClients)); err != nil {
-		return fmt.Errorf("invalid max_tracked_clients %q: %v", rd.MaxTrackedClients, err)
+	if rd.maxTrackedClients, err = strconv.Atoi(string(rd.MaxTrackedIPs)); err != nil {
+		return fmt.Errorf("invalid max_tracked_ips %q: %v", rd.MaxTrackedIPs, err)
 	}
 	if rd.maxTrackedClients <= 0 {
-		return fmt.Errorf("max_tracked_clients must be greater than 0")
+		return fmt.Errorf("max_tracked_ips must be greater than 0")
 	}
 
 	if len(rd.Resolvers) > 0 {
@@ -289,13 +309,14 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.String("dns_prefix", rd.DnsPrefix),
 			zap.String("status_code", string(rd.StatusCode)),
 			zap.Duration("lookup_timeout", rd.lookupMax),
-			zap.Duration("cache_ttl", rd.lookupTTL),
+			zap.Duration("min_cache_ttl", rd.lookupTTL),
+			zap.Duration("max_cache_ttl", rd.maxLookupTTL),
 			zap.Duration("negative_cache_ttl", rd.negativeLookupTTL),
-			zap.Duration("stale_ttl", rd.staleLookupTTL),
+			zap.Duration("stale_cache_ttl", rd.staleLookupTTL),
 			zap.Int("max_cache_size", rd.maxCacheSize),
-			zap.Int("max_tracked_clients", rd.maxTrackedClients),
-			zap.Duration("host_limit_window", rd.hostLimitWindow),
-			zap.Int("max_hosts_per_client", rd.maxHostsPerClient),
+			zap.Int("per_ip_rate_limit_limit", rd.maxHostsPerClient),
+			zap.Duration("per_ip_rate_limit_duration", rd.hostLimitWindow),
+			zap.Int("max_tracked_ips", rd.maxTrackedClients),
 			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
 			zap.Int("rate_limit_bypass_entries", len(rd.RateLimitBypass)),
 			zap.Int("resolvers_count", len(rd.Resolvers)),
@@ -335,41 +356,49 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.LookupTimeout = d.Val()
-			case "cache_ttl":
+			case "min_cache_ttl":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.CacheTTL = d.Val()
+				rd.MinCacheTTL = d.Val()
+			case "max_cache_ttl":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.MaxCacheTTL = d.Val()
 			case "negative_cache_ttl":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
 				rd.NegativeCacheTTL = d.Val()
-			case "stale_ttl":
+			case "stale_cache_ttl":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.StaleTTL = d.Val()
-			case "host_limit_window":
+				rd.StaleCacheTTL = d.Val()
+			case "per_ip_rate_limit":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.HostLimitWindow = d.Val()
-			case "max_hosts_per_client":
+				limit := d.Val()
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				rd.MaxHostsPerClient = StringOrInt(d.Val())
+				if rd.PerIPRateLimit == nil {
+					rd.PerIPRateLimit = &PerIPRateLimit{}
+				}
+				rd.PerIPRateLimit.Limit = StringOrInt(limit)
+				rd.PerIPRateLimit.Duration = d.Val()
+			case "max_tracked_ips":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.MaxTrackedIPs = StringOrInt(d.Val())
 			case "max_cache_size":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
 				rd.MaxCacheSize = StringOrInt(d.Val())
-			case "max_tracked_clients":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				rd.MaxTrackedClients = StringOrInt(d.Val())
 			case "trusted_proxies":
 				if !d.NextArg() {
 					return d.ArgErr()

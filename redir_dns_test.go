@@ -635,21 +635,21 @@ func TestProvisionRejectsInvalidConstraints(t *testing.T) {
 	}
 
 	rd = New()
-	rd.CacheTTL = "-1ns"
+	rd.MinCacheTTL = "-1ns"
 	if err := rd.Provision(caddyCtx); err == nil {
 		t.Fatalf("expected provision error for negative cache ttl")
 	}
 
 	rd = New()
-	rd.HostLimitWindow = "0"
+	rd.PerIPRateLimit.Duration = "0"
 	if err := rd.Provision(caddyCtx); err == nil {
-		t.Fatalf("expected provision error for zero host limit window")
+		t.Fatalf("expected provision error for zero per_ip_rate_limit duration")
 	}
 
 	rd = New()
-	rd.MaxHostsPerClient = "0"
+	rd.PerIPRateLimit.Limit = "0"
 	if err := rd.Provision(caddyCtx); err == nil {
-		t.Fatalf("expected provision error for non-positive max_hosts_per_client")
+		t.Fatalf("expected provision error for zero per_ip_rate_limit limit")
 	}
 }
 

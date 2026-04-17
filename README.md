@@ -31,16 +31,16 @@ Several optional parameters are also supported:
 
 		resolvers            1.1.1.1 8.8.8.8
 		lookup_timeout       2s
-		cache_ttl            30s
+		min_cache_ttl        30s
+		max_cache_ttl        1h
 		negative_cache_ttl   5s
-		stale_ttl            30s
+		stale_cache_ttl      30s
 		max_cache_size       10_000
 
-		trusted_proxies      10.0.0.0/8 192.168.0.0/16
-		host_limit_window    1m
-		max_hosts_per_client 50
-		max_tracked_clients  100_000
-		rate_limit_bypass    10.0.0.0/8
+		per_ip_rate_limit    50 1m
+		max_tracked_ips      100_000
+		trusted_proxies      10.0.0.0/8 192.168.1.1/32
+		rate_limit_bypass    192.168.0.0/16 192.168.2.1/32
 
 		response_template    /etc/caddy/error.html
 		http_cache_control
@@ -55,9 +55,9 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 ```caddyfile
 :80 {
 	redir_dns {
-		default_target "{env.FALLBACK_URL}"
-		status_code    "{env.REDIRECT_STATUS}"
-		lookup_timeout "{env.LOOKUP_TIMEOUT}"
+		default_target  "{env.FALLBACK_URL}"
+		status_code     "{env.REDIRECT_STATUS}"
+		lookup_timeout  "{env.LOOKUP_TIMEOUT}"
 		trusted_proxies "{env.PROXY_CIDR}"
 	}
 }
@@ -77,19 +77,19 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 |---|---|---|
 | `resolvers` | system | One or more DNS resolver addresses (`host` or `host:port`, e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Tried in order; port `53` assumed when omitted. When absent the system resolver is used. |
 | `lookup_timeout` | `2s` | Maximum time to wait for a DNS TXT lookup before applying fallback behaviour. Go duration string; maximum `30s`. |
-| `cache_ttl` | `30s` | Minimum time to cache successful DNS TXT results in memory. When the record's own DNS TTL is larger it is used instead, so entries are never served from cache longer than the upstream resolver intended. Go duration string. |
-| `negative_cache_ttl` | `5s` | Time to cache failed lookups (NXDOMAIN, no record found, timeout). Kept shorter than `cache_ttl` so that newly-added TXT records are discovered quickly. Go duration string. |
-| `stale_ttl` | — | How long after a cache entry expires it may still be served while a single background refresh is in flight (stale-while-revalidate). Eliminates cache-stampede bursts when many entries expire simultaneously — requests during the stale window return immediately with the old value; only one upstream lookup per key is triggered. Once `cache_ttl + stale_ttl` is exceeded the next caller blocks on a fresh lookup as normal. Disabled when absent. Go duration string. |
-| `max_cache_size` | `10000` | Maximum number of DNS TXT results held in the in-memory cache. The entry with the soonest expiry is evicted when full. |
+| `min_cache_ttl` | `30s` | Time to cache successful DNS TXT results in memory. When custom `resolvers` are not configured the system resolver is used, which does not expose DNS record TTLs — this value is used directly as the cache TTL. When custom resolvers are configured and the DNS record returns a TTL, the larger of the two is used, up to `max_cache_ttl`. Must be ≤ `max_cache_ttl`. Go duration string. |
+| `max_cache_ttl` | `1h` | Maximum time to cache successful DNS TXT results in memory. Caps the TTL honoured from the DNS record so that long-lived records are still refreshed within a predictable bound. Must be ≥ `min_cache_ttl`. Go duration string. |
+| `negative_cache_ttl` | `5s` | Time to cache failed lookups (NXDOMAIN, no record found, timeout). Kept shorter than `min_cache_ttl` so that newly-added TXT records are discovered quickly. Go duration string. |
+| `stale_cache_ttl` | — | How long after a cache entry expires it may still be served while a single background refresh is in flight (stale-while-revalidate). Eliminates cache-stampede bursts when many entries expire simultaneously — requests during the stale window return immediately with the old value; only one upstream lookup per key is triggered. Once `min_cache_ttl + stale_cache_ttl` is exceeded the next caller blocks on a fresh lookup as normal. Disabled when absent. Go duration string. |
+| `max_cache_size` | `10_000` | Maximum number of DNS TXT results held in the in-memory cache. The entry with the soonest expiry is evicted when full. |
 
 **DNS lookup guard**
 
 | Parameter | Default | Description |
 |---|---|---|
+| `per_ip_rate_limit` | `50 1m` | Per-client rate limit: `<limit> <duration>`. Maximum distinct hostnames a single IP may trigger first-time DNS lookups for within the sliding window. Repeat lookups for a hostname already seen in the window are always free. Exceeding the limit falls back to `default_target` or returns `429`. Both values accept Caddy global placeholders. |
+| `max_tracked_ips` | `100_000` | Maximum number of per-IP tracking entries held in memory. An arbitrary entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
 | `trusted_proxies` | — | CIDRs or IPs allowed to supply the client address via `X-Forwarded-For` or `X-Real-IP`. `X-Forwarded-For` is walked right-to-left to find the rightmost non-trusted entry; `X-Real-IP` is used as a fallback. Both headers are ignored when the direct peer is not trusted. |
-| `host_limit_window` | `1m` | Sliding window over which per-client distinct-hostname DNS lookups are counted. Go duration string. |
-| `max_hosts_per_client` | `50` | Maximum distinct hostnames a single client may trigger first-time DNS lookups for within `host_limit_window`. Repeat lookups for a hostname already seen in the window are always free. Exceeding the limit falls back to `default_target` or returns `429`. |
-| `max_tracked_clients` | `100000` | Maximum number of per-client tracking entries held in memory. An existing entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
 | `rate_limit_bypass` | — | CIDRs or IPs exempt from the per-client DNS lookup rate limit. Accepts the same format as `trusted_proxies`. The resolved client IP (after `trusted_proxies` unwrapping) is matched against this list. Useful for load testing, internal health checks, or other known trusted clients. |
 
 **Response**

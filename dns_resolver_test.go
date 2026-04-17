@@ -385,7 +385,7 @@ func TestLookupTXTStaleWhileRevalidate(t *testing.T) {
 	t.Parallel()
 
 	rd := New()
-	rd.lookupTTL = 10 * time.Millisecond   // short TTL so the entry expires quickly
+	rd.lookupTTL = 10 * time.Millisecond      // short TTL so the entry expires quickly
 	rd.staleLookupTTL = 50 * time.Millisecond // stale window after expiry
 
 	var calls atomic.Int64
@@ -431,7 +431,7 @@ func TestLookupTXTStaleWindowExpiredForcesSync(t *testing.T) {
 	t.Parallel()
 
 	rd := New()
-	rd.lookupTTL = 10 * time.Millisecond  // short TTL
+	rd.lookupTTL = 10 * time.Millisecond      // short TTL
 	rd.staleLookupTTL = 10 * time.Millisecond // very short stale window
 
 	var calls atomic.Int64
@@ -462,7 +462,7 @@ func TestLookupTXTStaleWindowExpiredForcesSync(t *testing.T) {
 	}
 }
 
-func TestLookupTXTStaleTTLDisabledByDefault(t *testing.T) {
+func TestLookupTXTStaleCacheTTLDisabledByDefault(t *testing.T) {
 	t.Parallel()
 
 	// staleLookupTTL=0 (default) must not serve stale data; expired entries trigger
@@ -486,10 +486,10 @@ func TestLookupTXTStaleTTLDisabledByDefault(t *testing.T) {
 	// Must go synchronous (cached=false).
 	_, _, cached := rd.lookupTXT("_redirdns.nostale.example.com")
 	if cached {
-		t.Fatal("with stale_ttl disabled, expired entry should not report cached=true")
+		t.Fatal("with stale_cache_ttl disabled, expired entry should not report cached=true")
 	}
 	if calls.Load() != 2 {
-		t.Fatalf("expected 2 lookups without stale_ttl, got %d", calls.Load())
+		t.Fatalf("expected 2 lookups without stale_cache_ttl, got %d", calls.Load())
 	}
 }
 

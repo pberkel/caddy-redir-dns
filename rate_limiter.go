@@ -18,8 +18,8 @@ const (
 	// Default maximum unique hosts per client in a window
 	defaultMaxHostsPerClient = 50
 
-	// Default maximum number of tracked rate-limit clients
-	defaultMaxTrackedClients = 100_000
+	// Default maximum number of tracked per-IP rate-limit entries
+	defaultMaxTrackedIPs = 100_000
 
 	// Maximum number of bytes examined in an X-Forwarded-For header. The
 	// right-to-left walk only needs the tail of the header (the most recently

@@ -1,9 +1,23 @@
 # Changelog
 
+## v1.5.0 — 2026-04-18
+
+### Added
+- `max_cache_ttl` configuration parameter (default: `1h`) caps the TTL honoured from the DNS record for in-memory cache entries. Without this, a record with a very long DNS TTL (e.g. `86400s`) would be cached for the full duration without any updates being reflected. The effective cache TTL for a successful lookup is `clamp(max(min_cache_ttl, dnsTTL), min_cache_ttl, max_cache_ttl)`. Must be ≥ `min_cache_ttl`. Accepts a Go duration string or a Caddy global placeholder (e.g. `{env.MAX_CACHE_TTL}`).
+- `per_ip_rate_limit <limit> <duration>` configuration directive replaces the separate `host_limit_window` and `max_hosts_per_client` parameters. The two positional arguments follow the same `<limit> <duration>` convention used by `caddy-tls-issuer-rate-limit`, making the rate-limit intent immediately visible at a glance. Both arguments accept Caddy global placeholders.
+- `max_tracked_ips` configuration parameter replaces `max_tracked_clients`. The rename clarifies that tracking is per client IP address, consistent with the new `per_ip_rate_limit` naming.
+
+### Changed
+- **Breaking:** `cache_ttl` Caddyfile directive and JSON field has been renamed to `min_cache_ttl`. The behaviour is unchanged — it sets the minimum cache TTL for successful lookups, with the DNS record TTL taking precedence when larger. The rename makes this floor semantics explicit. Update existing configs: `cache_ttl 30s` → `min_cache_ttl 30s`.
+- **Breaking:** `host_limit_window` and `max_hosts_per_client` Caddyfile directives and JSON fields have been removed and replaced by `per_ip_rate_limit`. Update existing configs: `host_limit_window 1m` + `max_hosts_per_client 50` → `per_ip_rate_limit 50 1m`.
+- **Breaking:** `max_tracked_clients` Caddyfile directive and JSON field has been renamed to `max_tracked_ips`.
+
+---
+
 ## v1.4.0 — 2026-04-16
 
 ### Added
-- `stale_ttl` configuration parameter (default: disabled) enables stale-while-revalidate behaviour for the in-memory DNS TXT cache. When configured, an expired cache entry is served immediately while a single background DNS lookup refreshes the entry, rather than blocking the request until a fresh result is available. This eliminates the cache-stampede pattern that occurs when all entries expire simultaneously under sustained load — instead of a burst of synchronous upstream lookups, at most one refresh per key is in flight at any time. The stale window extends from the entry's `cache_ttl` expiry by the configured duration; once the hard boundary (`cache_ttl + stale_ttl`) is exceeded the next caller blocks on a fresh lookup as normal. Negative cache entries (NXDOMAIN, no record) are served stale and refreshed in the background by the same mechanism. Disabled by default to preserve existing behaviour — set to a positive Go duration string (e.g. `stale_ttl 30s`) to enable. Accepts a Caddy global placeholder (e.g. `{env.STALE_TTL}`).
+- `stale_cache_ttl` configuration parameter (default: disabled) enables stale-while-revalidate behaviour for the in-memory DNS TXT cache. When configured, an expired cache entry is served immediately while a single background DNS lookup refreshes the entry, rather than blocking the request until a fresh result is available. This eliminates the cache-stampede pattern that occurs when all entries expire simultaneously under sustained load — instead of a burst of synchronous upstream lookups, at most one refresh per key is in flight at any time. The stale window extends from the entry's `min_cache_ttl` expiry by the configured duration; once the hard boundary (`min_cache_ttl + stale_cache_ttl`) is exceeded the next caller blocks on a fresh lookup as normal. Negative cache entries (NXDOMAIN, no record) are served stale and refreshed in the background by the same mechanism. Disabled by default to preserve existing behaviour — set to a positive Go duration string (e.g. `stale_cache_ttl 30s`) to enable. Accepts a Caddy global placeholder (e.g. `{env.STALE_CACHE_TTL}`).
 
 ---
 
