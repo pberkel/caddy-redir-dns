@@ -86,6 +86,7 @@ func New() *RedirDns {
 		lookupMax:           defaultDnsLookupTimeout,
 		dnsCache:            &dnsCache{entries: make(map[string]dnsCacheEntry)},
 		maxCacheSize:        defaultMaxCacheSize,
+		cacheEnabled:        true, // true in New() so tests work without Provision; overridden by Provision
 		hostLimit:           &hostLimitState{trackers: make(map[string]*hostTracker)},
 		maxTrackedClients:   defaultMaxTrackedIPs,
 		hostLimitWindow:     defaultHostLimitWindow,
@@ -263,6 +264,8 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("max_tracked_ips must be greater than 0")
 	}
 
+	rd.cacheEnabled = rd.Cache
+
 	if len(rd.Resolvers) > 0 {
 		rd.lookupFunc = newMiekgLookupFunc(rd.Resolvers, rd.logger)
 	}
@@ -321,6 +324,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Int("rate_limit_bypass_entries", len(rd.RateLimitBypass)),
 			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
+			zap.Bool("cache", rd.cacheEnabled),
 			zap.Bool("debug_headers", len(rd.debugKey) > 0),
 			zap.Bool("http_cache_control", rd.HTTPCacheControl),
 		)
@@ -376,6 +380,18 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.StaleCacheTTL = d.Val()
+			case "cache":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				switch d.Val() {
+				case "true":
+					rd.Cache = true
+				case "false":
+					rd.Cache = false
+				default:
+					return d.Errf("cache must be 'true' or 'false', got %q", d.Val())
+				}
 			case "per_ip_rate_limit":
 				if !d.NextArg() {
 					return d.ArgErr()

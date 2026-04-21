@@ -493,6 +493,37 @@ func TestLookupTXTStaleCacheTTLDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestLookupTXTCacheDisabled(t *testing.T) {
+	t.Parallel()
+
+	// With cacheEnabled=false, every call must trigger a fresh lookup and cached must always be false.
+	rd := New()
+	rd.cacheEnabled = false
+
+	var calls atomic.Int64
+	rd.lookupFunc = func(ctx context.Context, query string) ([]string, time.Duration, error) {
+		calls.Add(1)
+		return []string{"https://example.com"}, 0, nil
+	}
+
+	for range 3 {
+		_, _, cached := rd.lookupTXT("_redirdns.nocache.example.com")
+		if cached {
+			t.Fatal("cache disabled: lookup should never report cached=true")
+		}
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("cache disabled: expected 3 upstream lookups, got %d", calls.Load())
+	}
+	// Cache map must remain empty.
+	rd.dnsCache.mu.RLock()
+	n := len(rd.dnsCache.entries)
+	rd.dnsCache.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("cache disabled: expected empty cache map, got %d entries", n)
+	}
+}
+
 func TestClassifyLookupError(t *testing.T) {
 	t.Parallel()
 

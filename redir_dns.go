@@ -105,6 +105,11 @@ type RedirDns struct {
 	// Maximum number of DNS TXT records held in the in-memory cache. Default: 10000
 	// Accepts a bare integer or a quoted string (e.g. "{env.MAX_CACHE_SIZE}").
 	MaxCacheSize StringOrInt `json:"max_cache_size,omitempty"`
+	// Whether to cache DNS TXT lookup results in memory. When false every request
+	// triggers a fresh DNS lookup; when true results are cached according to the
+	// min_cache_ttl / max_cache_ttl / negative_cache_ttl / stale_cache_ttl
+	// parameters. Default: false.
+	Cache bool `json:"cache,omitempty"`
 
 	// --- DNS lookup guard ---
 
@@ -173,6 +178,7 @@ type RedirDns struct {
 	lookupFunc        func(context.Context, string) ([]string, time.Duration, error) // overridden in tests
 	dnsCache          *dnsCache
 	maxCacheSize      int
+	cacheEnabled      bool // runtime copy of Cache; true in New() so tests work without Provision
 
 	// DNS lookup guard
 	hostLimit         *hostLimitState

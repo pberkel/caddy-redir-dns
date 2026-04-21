@@ -83,6 +83,23 @@ redir_dns {
 	}
 }
 
+func TestUnmarshalCaddyfileCache(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	d := caddyfile.NewTestDispenser(`
+redir_dns {
+	cache true
+}
+`)
+	if err := rd.UnmarshalCaddyfile(d); err != nil {
+		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
+	}
+	if !rd.Cache {
+		t.Fatal("cache = false, want true")
+	}
+}
+
 func TestUnmarshalCaddyfileRateLimitBypass(t *testing.T) {
 	t.Parallel()
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.6.0 — TBD
+
+### Added
+- `cache` configuration parameter (default: `false`) controls whether DNS TXT lookup results are cached in memory. When `false` (the default) every request triggers a fresh DNS lookup — appropriate for most small deployments where DNS lookup latency is acceptable. Set to `true` on high-traffic deployments where repeated upstream lookups would become a bottleneck. The cache-related parameters (`min_cache_ttl`, `max_cache_ttl`, `negative_cache_ttl`, `stale_cache_ttl`, `max_cache_size`) are only active when `cache true` is set.
+
+---
+
 ## v1.5.0 — 2026-04-18
 
 ### Added

@@ -68,6 +68,12 @@ const (
 // stale result is returned immediately and a background refresh is scheduled via
 // DoChan so that at most one upstream lookup is in flight per key.
 func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
+	if !rd.cacheEnabled {
+		// Cache is disabled — perform a fresh lookup on every request without
+		// touching the cache at all.
+		txt, err := rd.doLookup(query)
+		return txt, err, false
+	}
 	now := time.Now()
 	txt, err, status := rd.cachedLookup(query, now)
 	switch status {
@@ -101,6 +107,26 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 		entry, _ := value.(dnsCacheEntry)
 		return append([]string(nil), entry.txt...), entry.err, false
 	}
+}
+
+// doLookup performs a single upstream DNS TXT lookup for query and returns the
+// raw result without touching the cache. Used when caching is disabled.
+func (rd *RedirDns) doLookup(query string) ([]string, error) {
+	lookupCtx, cancel := context.WithTimeout(context.Background(), rd.lookupMax)
+	defer cancel()
+	var (
+		txt []string
+		err error
+	)
+	if rd.lookupFunc != nil {
+		txt, _, err = rd.lookupFunc(lookupCtx, query)
+	} else {
+		txt, err = rd.resolver.LookupTXT(lookupCtx, query)
+	}
+	if err == nil && len(txt) == 0 {
+		err = errNoTXTRecord
+	}
+	return txt, err
 }
 
 // doLookupAndStore performs a single upstream DNS TXT lookup for query, stores the

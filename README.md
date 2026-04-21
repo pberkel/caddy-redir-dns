@@ -31,6 +31,7 @@ Several optional parameters are also supported:
 
 		resolvers            1.1.1.1 8.8.8.8
 		lookup_timeout       2s
+		cache                true
 		min_cache_ttl        30s
 		max_cache_ttl        1h
 		negative_cache_ttl   5s
@@ -77,6 +78,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 |---|---|---|
 | `resolvers` | system | One or more DNS resolver addresses (`host` or `host:port`, e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Tried in order; port `53` assumed when omitted. When absent the system resolver is used. |
 | `lookup_timeout` | `2s` | Maximum time to wait for a DNS TXT lookup before applying fallback behaviour. Go duration string; maximum `30s`. |
+| `cache` | `false` | Enable in-memory caching of DNS TXT lookup results. When `false` (default) every request triggers a fresh DNS lookup. Set to `true` on high-traffic deployments where DNS lookup latency would otherwise be a bottleneck. The remaining cache parameters (`min_cache_ttl`, `max_cache_ttl`, etc.) only take effect when `cache true` is set. |
 | `min_cache_ttl` | `30s` | Time to cache successful DNS TXT results in memory. When custom `resolvers` are not configured the system resolver is used, which does not expose DNS record TTLs — this value is used directly as the cache TTL. When custom resolvers are configured and the DNS record returns a TTL, the larger of the two is used, up to `max_cache_ttl`. Must be ≤ `max_cache_ttl`. Go duration string. |
 | `max_cache_ttl` | `1h` | Maximum time to cache successful DNS TXT results in memory. Caps the TTL honoured from the DNS record so that long-lived records are still refreshed within a predictable bound. Must be ≥ `min_cache_ttl`. Go duration string. |
 | `negative_cache_ttl` | `5s` | Time to cache failed lookups (NXDOMAIN, no record found, timeout). Kept shorter than `min_cache_ttl` so that newly-added TXT records are discovered quickly. Go duration string. |
