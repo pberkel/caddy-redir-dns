@@ -80,6 +80,11 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 |---|---|---|
 | `resolvers` | system | One or more DNS resolver addresses (`host` or `host:port`, e.g. `1.1.1.1`, `8.8.8.8:53`, `dns.example.com:5353`). Tried in order; port `53` assumed when omitted. When absent the system resolver is used. |
 | `lookup_timeout` | `2s` | Maximum time to wait for a DNS TXT lookup before applying fallback behaviour. Go duration string; maximum `30s`. |
+
+**DNS cache**
+
+| Parameter | Default | Description |
+|---|---|---|
 | `cache` | `false` | Enable in-memory caching of DNS TXT lookup results. When `false` (default) every request triggers a fresh DNS lookup. Set to `true` on high-traffic deployments where DNS lookup latency would otherwise be a bottleneck. The remaining cache parameters (`min_cache_ttl`, `max_cache_ttl`, etc.) only take effect when `cache true` is set. |
 | `min_cache_ttl` | `30s` | Time to cache successful DNS TXT results in memory. When custom `resolvers` are not configured the system resolver is used, which does not expose DNS record TTLs — this value is used directly as the cache TTL. When custom resolvers are configured and the DNS record returns a TTL, the larger of the two is used, up to `max_cache_ttl`. Must be ≤ `max_cache_ttl`. Go duration string. |
 | `max_cache_ttl` | `1h` | Maximum time to cache successful DNS TXT results in memory. Caps the TTL honoured from the DNS record so that long-lived records are still refreshed within a predictable bound. Must be ≥ `min_cache_ttl`. Go duration string. |
@@ -87,7 +92,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 | `stale_cache_ttl` | — | How long after a cache entry expires it may still be served while a single background refresh is in flight (stale-while-revalidate). Eliminates cache-stampede bursts when many entries expire simultaneously — requests during the stale window return immediately with the old value; only one upstream lookup per key is triggered. Once `min_cache_ttl + stale_cache_ttl` is exceeded the next caller blocks on a fresh lookup as normal. Disabled when absent. Go duration string. |
 | `max_cache_size` | `10_000` | Maximum number of DNS TXT results held in the in-memory cache. The entry with the soonest expiry is evicted when full. |
 
-**DNS lookup guard**
+**DNS lookup guard / Request rate limit**
 
 | Parameter | Default | Description |
 |---|---|---|
