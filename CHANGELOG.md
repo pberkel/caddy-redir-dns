@@ -1,9 +1,16 @@
 # Changelog
 
-## v1.6.0 — TBD
+## v1.6.0 — 2026-04-22
 
 ### Added
 - `cache` configuration parameter (default: `false`) controls whether DNS TXT lookup results are cached in memory. When `false` (the default) every request triggers a fresh DNS lookup — appropriate for most small deployments where DNS lookup latency is acceptable. Set to `true` on high-traffic deployments where repeated upstream lookups would become a bottleneck. The cache-related parameters (`min_cache_ttl`, `max_cache_ttl`, `negative_cache_ttl`, `stale_cache_ttl`, `max_cache_size`) are only active when `cache true` is set.
+- `rate_limit` configuration parameter (default: `false`) controls whether per-client DNS lookup rate limiting is enforced. When `false` (the default) all requests pass through regardless of how many distinct hostnames they trigger. Set to `true` on public deployments to guard against DNS amplification. The rate-limit parameters (`per_client_rate_limit`, `max_tracked_clients`, `ipv6_prefix_length`, `trusted_proxies`, `rate_limit_bypass`) are only active when `rate_limit true` is set.
+- `ipv6_prefix_length` configuration parameter (default: `64`) groups IPv6 client addresses by prefix for rate-limit tracking. Clients within the same prefix share a single tracker slot, preventing prefix-rotation attacks where an attacker cycles through a large IPv6 block to evade per-client limits. Has no effect on IPv4 addresses. Accepts values between `1` and `128`; use `128` to track each address individually.
+
+### Changed
+- **Breaking:** `per_ip_rate_limit` Caddyfile directive and JSON field has been renamed to `per_client_rate_limit`. The rename reflects that the tracking unit may now be an IPv6 prefix rather than a single IP address. Update existing configs: `per_ip_rate_limit 50 1m` → `per_client_rate_limit 100 1m`.
+- **Breaking:** `max_tracked_ips` Caddyfile directive and JSON field has been renamed to `max_tracked_clients`, consistent with the `per_client_rate_limit` rename.
+- `per_client_rate_limit` default limit raised from `50` to `100` per minute.
 
 ---
 
@@ -11,13 +18,13 @@
 
 ### Added
 - `max_cache_ttl` configuration parameter (default: `1h`) caps the TTL honoured from the DNS record for in-memory cache entries. Without this, a record with a very long DNS TTL (e.g. `86400s`) would be cached for the full duration without any updates being reflected. The effective cache TTL for a successful lookup is `clamp(max(min_cache_ttl, dnsTTL), min_cache_ttl, max_cache_ttl)`. Must be ≥ `min_cache_ttl`. Accepts a Go duration string or a Caddy global placeholder (e.g. `{env.MAX_CACHE_TTL}`).
-- `per_client_rate_limit <limit> <duration>` configuration directive replaces the separate `host_limit_window` and `max_hosts_per_client` parameters. The two positional arguments follow the same `<limit> <duration>` convention used by `caddy-tls-issuer-rate-limit`, making the rate-limit intent immediately visible at a glance. Both arguments accept Caddy global placeholders.
-- `max_tracked_clients` configuration parameter replaces `max_tracked_ips`. The rename aligns with the broader shift to "client" terminology (an IPv6 client may now represent a prefix, not a single IP), consistent with the new `per_client_rate_limit` naming.
+- `per_ip_rate_limit <limit> <duration>` configuration directive replaces the separate `host_limit_window` and `max_hosts_per_client` parameters. The two positional arguments follow the same `<limit> <duration>` convention used by `caddy-tls-issuer-rate-limit`, making the rate-limit intent immediately visible at a glance. Both arguments accept Caddy global placeholders.
+- `max_tracked_ips` configuration parameter replaces `max_tracked_clients`. The rename clarifies that tracking is per client IP address, consistent with the new `per_ip_rate_limit` naming.
 
 ### Changed
 - **Breaking:** `cache_ttl` Caddyfile directive and JSON field has been renamed to `min_cache_ttl`. The behaviour is unchanged — it sets the minimum cache TTL for successful lookups, with the DNS record TTL taking precedence when larger. The rename makes this floor semantics explicit. Update existing configs: `cache_ttl 30s` → `min_cache_ttl 30s`.
-- **Breaking:** `host_limit_window` and `max_hosts_per_client` Caddyfile directives and JSON fields have been removed and replaced by `per_client_rate_limit`. Update existing configs: `host_limit_window 1m` + `max_hosts_per_client 50` → `per_client_rate_limit 100 1m`.
-- **Breaking:** `max_tracked_ips` Caddyfile directive and JSON field has been renamed to `max_tracked_clients`.
+- **Breaking:** `host_limit_window` and `max_hosts_per_client` Caddyfile directives and JSON fields have been removed and replaced by `per_ip_rate_limit`. Update existing configs: `host_limit_window 1m` + `max_hosts_per_client 50` → `per_ip_rate_limit 50 1m`.
+- **Breaking:** `max_tracked_clients` Caddyfile directive and JSON field has been renamed to `max_tracked_ips`.
 
 ---
 
