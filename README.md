@@ -44,7 +44,6 @@ Several optional parameters are also supported:
 		per_client_rate_limit   100 1m
 		max_tracked_clients     100_000
 		ipv6_prefix_length      64
-		trusted_proxies         10.0.0.0/8 192.168.1.1/32
 		rate_limit_bypass       192.168.0.0/16 192.168.2.1/32
 		# Response parameters
 		response_template       /etc/caddy/error.html
@@ -63,7 +62,6 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 		default_target  "{env.FALLBACK_URL}"
 		status_code     "{env.REDIRECT_STATUS}"
 		lookup_timeout  "{env.LOOKUP_TIMEOUT}"
-		trusted_proxies "{env.PROXY_CIDR}"
 	}
 }
 ```
@@ -97,8 +95,32 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 | `per_client_rate_limit` | `100 1m` | Per-client rate limit: `<limit> <duration>`. Maximum distinct hostnames a single IP may trigger first-time DNS lookups for within the sliding window. Repeat lookups for a hostname already seen in the window are always free. Exceeding the limit falls back to `default_target` or returns `429`. Both values accept Caddy global placeholders. |
 | `max_tracked_clients` | `100_000` | Maximum number of per-IP tracking entries held in memory. An arbitrary entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
 | `ipv6_prefix_length` | `64` | IPv6 prefix length used to group client addresses for rate limiting. Clients within the same prefix are counted as a single entity, preventing prefix-rotation attacks where an attacker cycles through a large IPv6 block to evade per-IP limits. Has no effect on IPv4 addresses. Accepts values between `1` and `128`; use `128` to track each IPv6 address individually. |
-| `trusted_proxies` | — | CIDRs or IPs allowed to supply the client address via `X-Forwarded-For` or `X-Real-IP`. `X-Forwarded-For` is walked right-to-left to find the rightmost non-trusted entry; `X-Real-IP` is used as a fallback. Both headers are ignored when the direct peer is not trusted. |
-| `rate_limit_bypass` | — | CIDRs or IPs exempt from the per-client DNS lookup rate limit. Accepts the same format as `trusted_proxies`. The resolved client IP (after `trusted_proxies` unwrapping) is matched against this list. Useful for load testing, internal health checks, or other known trusted clients. |
+| `rate_limit_bypass` | — | CIDRs or IPs exempt from the per-client DNS lookup rate limit. Each value may be a bare IP address or a CIDR prefix (e.g. `10.0.0.0/8`). The resolved client IP is matched against this list. Useful for load testing, internal health checks, or other known trusted clients. |
+
+> **Client IP resolution and trusted proxies:** `caddy-redir-dns` reads the client IP resolved by Caddy's own trusted-proxy pipeline rather than implementing its own `X-Forwarded-For` parsing. Configure trusted proxies once at the Caddy server level using the global `servers` block:
+>
+> ```caddyfile
+> {
+>     servers {
+>         trusted_proxies static 10.0.0.0/8 192.168.0.0/16
+>     }
+> }
+> ```
+>
+> When a request arrives from a trusted peer, Caddy walks `X-Forwarded-For` left-to-right by default and stores the resolved client IP in the request context. `caddy-redir-dns` reads this value directly for rate-limit tracking — no additional configuration is required in the module itself.
+>
+> If your deployment uses `X-Forwarded-For` in the conventional format (rightmost entry is the closest proxy), add `trusted_proxies_strict` inside the `servers` block. This switches Caddy to a right-to-left walk, which finds the rightmost non-trusted entry and is more resistant to header spoofing:
+>
+> ```caddyfile
+> {
+>     servers {
+>         trusted_proxies static 10.0.0.0/8
+>         trusted_proxies_strict
+>     }
+> }
+> ```
+>
+> See the [Caddy documentation](https://caddyserver.com/docs/caddyfile/options#servers) for the full list of server options.
 
 **Response**
 

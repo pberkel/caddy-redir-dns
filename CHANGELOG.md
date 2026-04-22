@@ -15,6 +15,20 @@
 
 ### Changed
 - **Breaking:** `log_redirects` configuration flag removed. It emitted structured log entries for every request; replace with `metrics` for production observability (structured per-request logging at info level was too noisy under load and did not integrate with dashboards). Debug-level logging for individual DNS lookups and TXT record evaluations is unchanged.
+- **Breaking:** `trusted_proxies` configuration option removed from `caddy-redir-dns`. The module now reads the client IP that Caddy's own trusted-proxy pipeline has already resolved and stored in the request context (under `ClientIPVarKey`), rather than maintaining its own `X-Forwarded-For` / `X-Real-IP` parsing logic. Configure trusted proxies once at the Caddy server level instead:
+
+  ```caddyfile
+  {
+      servers {
+          trusted_proxies static 10.0.0.0/8
+          trusted_proxies_strict
+      }
+  }
+  ```
+
+  `trusted_proxies_strict` enables a right-to-left `X-Forwarded-For` walk (equivalent to the previous module behaviour), which finds the rightmost non-trusted entry and is more resistant to header spoofing. Without it, Caddy uses a left-to-right walk (less strict, accepts the leftmost plausible entry). Remove any `trusted_proxies` directive from your `redir_dns` block and migrate the CIDRs to the global `servers` block.
+
+  When no `servers { trusted_proxies ... }` block is configured (including in environments without a reverse proxy), `caddy-redir-dns` falls back to `r.RemoteAddr` as the client identifier — the same behaviour as before for direct-connect deployments.
 
 ---
 

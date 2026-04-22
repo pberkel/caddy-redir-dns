@@ -134,10 +134,8 @@ type RedirDns struct {
 	// Has no effect on IPv4 addresses. Default: 64 (typical per-host allocation boundary).
 	// Accepts a bare integer or a quoted string (e.g. "{env.IPV6_PREFIX_LENGTH}").
 	IPv6PrefixLength StringOrInt `json:"ipv6_prefix_length,omitempty"`
-	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
-	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 	// CIDRs or IPs that are exempt from the per-client DNS lookup rate limit.
-	// Accepts the same format as trusted_proxies (bare IPs or CIDR notation).
+	// Accepts bare IPs or CIDR notation (e.g. "10.0.0.0/8").
 	// Useful for internal health checks, load tests, or known trusted clients.
 	RateLimitBypass []string `json:"rate_limit_bypass,omitempty"`
 
@@ -199,7 +197,6 @@ type RedirDns struct {
 	maxHostsPerClient int
 	ipv6PrefixLen     int  // runtime copy of IPv6PrefixLength; default 64 in New()
 	rateLimitEnabled  bool // runtime copy of RateLimit; true in New() so tests work without Provision
-	trustedNets       []netip.Prefix
 	bypassNets        []netip.Prefix
 }
 

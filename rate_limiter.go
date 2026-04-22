@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
 const (
@@ -23,12 +24,6 @@ const (
 
 	// Default IPv6 prefix length for rate-limit grouping (one slot per /64 — typical per-host allocation)
 	defaultIPv6PrefixLength = 64
-
-	// Maximum number of bytes examined in an X-Forwarded-For header. The
-	// right-to-left walk only needs the tail of the header (the most recently
-	// appended entries), so any prefix beyond this limit is discarded before
-	// parsing to bound per-request CPU cost.
-	maxXFFBytes = 1024
 )
 
 // hostTracker records the set of distinct hostnames a single client has triggered DNS
@@ -63,7 +58,7 @@ func (rd *RedirDns) startHostLimitCleanup(ctx caddy.Context) {
 // exceedsPerClientHostLimit reports whether the client that sent r has triggered DNS
 // lookups for more distinct hostnames than maxHostsPerClient within hostLimitWindow.
 // Returns true (limit exceeded) when:
-//   - the client's remote address cannot be parsed (fail-closed)
+//   - the client's IP address cannot be determined (fail-closed)
 //   - the client has already triggered DNS lookups for maxHostsPerClient distinct
 //     hostnames within hostLimitWindow
 //
@@ -74,7 +69,7 @@ func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now 
 	if rd.maxHostsPerClient <= 0 || rd.hostLimitWindow <= 0 {
 		return false
 	}
-	clientID := rd.clientIDFromRequest(r)
+	clientID := clientIPFromRequest(r)
 	if clientID == "" {
 		return true // fail-closed: unparseable remote address
 	}
@@ -153,85 +148,24 @@ func (rd *RedirDns) cleanupHostLimitState(now time.Time) {
 	}
 }
 
-// clientIDFromRequest derives a stable client identifier (an IP address string) from r.
-// When the direct peer is not a trusted proxy the peer's IP is used directly.
-// When the direct peer is trusted, X-Forwarded-For is walked right-to-left to find
-// the rightmost non-trusted address; X-Real-IP is tried as a fallback if XFF is absent.
-// Returns an empty string if r.RemoteAddr cannot be parsed; callers treat this as
+// clientIPFromRequest returns the resolved client IP for rate-limit tracking.
+// It reads the value that Caddy's PrepareRequest stored in the request context
+// after performing trusted-proxy unwrapping using the server-level trusted_proxies
+// and client_ip_headers configuration (defaulting to X-Forwarded-For). Falls back
+// to the host part of r.RemoteAddr when the context value is absent, which happens
+// in unit tests that do not run through a full Caddy HTTP server.
+// Returns an empty string when no IP can be determined; callers treat this as
 // rate-limited (fail-closed).
-func (rd *RedirDns) clientIDFromRequest(r *http.Request) string {
-	remoteIP, ok := parseRemoteAddr(r.RemoteAddr)
-	if !ok {
-		// Return empty string to signal an unparseable peer; the caller treats
-		// this as rate-limited (fail-closed) rather than falling back to a shared
-		// "unknown" bucket that could conflate unrelated clients.
+func clientIPFromRequest(r *http.Request) string {
+	if ip, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && ip != "" {
+		return ip
+	}
+	// Fallback for test environments where PrepareRequest has not run.
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
 		return ""
 	}
-	if !rd.isTrustedProxy(remoteIP) {
-		return remoteIP.String()
-	}
-
-	// Peer is a trusted proxy — walk X-Forwarded-For right-to-left to find the
-	// rightmost non-trusted address. Walking without Split avoids a slice
-	// allocation on every trusted-proxy request.
-	//
-	// Private/loopback addresses are intentionally accepted: the right-to-left
-	// walk already defeats spoofing (a correctly-behaving proxy appends the real
-	// peer IP, so injected entries are never the rightmost non-trusted one).
-	// Rejecting private IPs would break all-internal deployments where clients
-	// and proxies all reside on RFC-1918 space.
-	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
-		if len(xff) > maxXFFBytes {
-			xff = xff[len(xff)-maxXFFBytes:]
-			// The truncation point may fall mid-address; skip the partial leading
-			// entry so the right-to-left walk only sees complete IP strings.
-			if idx := strings.Index(xff, ","); idx >= 0 {
-				xff = xff[idx+1:]
-			} else {
-				xff = "" // entire kept portion is a single (possibly partial) entry
-			}
-		}
-		for xff != "" {
-			var part string
-			if idx := strings.LastIndex(xff, ","); idx >= 0 {
-				part = strings.TrimSpace(xff[idx+1:])
-				xff = xff[:idx]
-			} else {
-				part = xff
-				xff = ""
-			}
-			candidateIP, valid := parseIPFromAddrPortOrLiteral(part)
-			if !valid {
-				continue
-			}
-			if rd.isTrustedProxy(candidateIP) {
-				continue
-			}
-			return candidateIP.String()
-		}
-	}
-
-	// Fall back to X-Real-IP (set by nginx and some other proxies instead of
-	// or in addition to X-Forwarded-For).
-	if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
-		if candidateIP, valid := parseIPFromAddrPortOrLiteral(xri); valid {
-			if !rd.isTrustedProxy(candidateIP) {
-				return candidateIP.String()
-			}
-		}
-	}
-
-	return remoteIP.String()
-}
-
-// isTrustedProxy reports whether addr falls within any of the configured trusted proxy prefixes.
-func (rd *RedirDns) isTrustedProxy(addr netip.Addr) bool {
-	for _, prefix := range rd.trustedNets {
-		if prefix.Contains(addr) {
-			return true
-		}
-	}
-	return false
+	return host
 }
 
 // isRateLimitBypassed reports whether addr falls within any of the configured rate-limit bypass prefixes.
@@ -244,12 +178,12 @@ func (rd *RedirDns) isRateLimitBypassed(addr netip.Addr) bool {
 	return false
 }
 
-// parseTrustedProxyPrefixes converts a slice of CIDR strings or bare IP addresses into
+// parseNetPrefixes converts a slice of CIDR strings or bare IP addresses into
 // a slice of netip.Prefix values. Bare IP addresses are converted to host prefixes
 // (/32 for IPv4, /128 for IPv6). CIDR prefixes are masked to their network address so
 // that a host bit set in the input (e.g. "10.0.0.1/8") does not cause a mismatch.
 // Returns nil for an empty input without error.
-func parseTrustedProxyPrefixes(values []string) ([]netip.Prefix, error) {
+func parseNetPrefixes(values []string) ([]netip.Prefix, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
@@ -262,34 +196,19 @@ func parseTrustedProxyPrefixes(values []string) ([]netip.Prefix, error) {
 		if strings.Contains(value, "/") {
 			prefix, err := netip.ParsePrefix(value)
 			if err != nil {
-				return nil, fmt.Errorf("invalid trusted_proxies entry %q: %w", value, err)
+				return nil, fmt.Errorf("invalid entry %q: %w", value, err)
 			}
 			prefixes = append(prefixes, prefix.Masked())
 			continue
 		}
 		addr, err := netip.ParseAddr(value)
 		if err != nil {
-			return nil, fmt.Errorf("invalid trusted_proxies entry %q: %w", value, err)
+			return nil, fmt.Errorf("invalid entry %q: %w", value, err)
 		}
 		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
 	}
 
 	return prefixes, nil
-}
-
-// parseRemoteAddr parses an IP address from a "host:port" string as set by
-// Go's net/http in r.RemoteAddr. Unlike parseIPFromAddrPortOrLiteral it skips
-// the bare-IP parse attempt since r.RemoteAddr is always in host:port form.
-func parseRemoteAddr(value string) (netip.Addr, bool) {
-	host, _, err := net.SplitHostPort(value)
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	return addr, true
 }
 
 // parseIPFromAddrPortOrLiteral parses an IP address from either a bare IP

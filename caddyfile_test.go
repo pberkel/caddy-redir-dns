@@ -15,7 +15,6 @@ redir_dns {
 	lookup_timeout 750ms
 	min_cache_ttl 45s
 	per_client_rate_limit 77 90s
-	trusted_proxies 10.0.0.0/8 192.168.0.0/16
 }
 `)
 
@@ -36,12 +35,6 @@ redir_dns {
 	}
 	if rd.PerClientRateLimit.Limit != "77" {
 		t.Fatalf("per_client_rate_limit limit = %q, want %q", rd.PerClientRateLimit.Limit, "77")
-	}
-	if len(rd.TrustedProxies) != 2 {
-		t.Fatalf("trusted proxies length = %d, want %d", len(rd.TrustedProxies), 2)
-	}
-	if rd.TrustedProxies[0] != "10.0.0.0/8" || rd.TrustedProxies[1] != "192.168.0.0/16" {
-		t.Fatalf("unexpected trusted proxies: %#v", rd.TrustedProxies)
 	}
 }
 

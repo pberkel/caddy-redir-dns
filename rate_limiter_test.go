@@ -1,11 +1,14 @@
 package redirdns
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
 func TestExceedsPerClientHostLimitRespectsMaxTrackedClients(t *testing.T) {
@@ -48,129 +51,51 @@ func TestExceedsPerClientHostLimitFailsClosedForUnparseableRemoteAddr(t *testing
 	}
 }
 
-func TestClientIDFromRequestUsesXFFWhenRemoteIsTrustedProxy(t *testing.T) {
+func TestClientIPFromRequestUsesCaddyContextWhenPresent(t *testing.T) {
 	t.Parallel()
-
-	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
-	}
-	rd.trustedNets = nets
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	req.RemoteAddr = "10.1.2.3:4321"
-	req.Header.Set("X-Forwarded-For", "198.51.100.10, 10.20.30.40")
+	// Simulate what Caddy's PrepareRequest stores after trusted-proxy unwrapping.
+	ctx := context.WithValue(req.Context(), caddyhttp.VarsCtxKey, map[string]any{
+		caddyhttp.ClientIPVarKey: "198.51.100.10",
+	})
+	req = req.WithContext(ctx)
 
-	clientID := rd.clientIDFromRequest(req)
-	if clientID != "198.51.100.10" {
-		t.Fatalf("clientID = %q, want %q", clientID, "198.51.100.10")
+	if got := clientIPFromRequest(req); got != "198.51.100.10" {
+		t.Fatalf("clientIPFromRequest = %q, want %q", got, "198.51.100.10")
 	}
 }
 
-func TestClientIDFromRequestIgnoresXFFWhenRemoteIsUntrusted(t *testing.T) {
+func TestClientIPFromRequestFallsBackToRemoteAddr(t *testing.T) {
 	t.Parallel()
 
-	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
-	}
-	rd.trustedNets = nets
-
+	// No Caddy context — should fall back to r.RemoteAddr host.
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	req.RemoteAddr = "203.0.113.7:44321"
-	req.Header.Set("X-Forwarded-For", "198.51.100.10")
 
-	clientID := rd.clientIDFromRequest(req)
-	if clientID != "203.0.113.7" {
-		t.Fatalf("clientID = %q, want %q", clientID, "203.0.113.7")
+	if got := clientIPFromRequest(req); got != "203.0.113.7" {
+		t.Fatalf("clientIPFromRequest = %q, want %q", got, "203.0.113.7")
 	}
 }
 
-func TestClientIDFromRequestReturnsEmptyForUnparseableRemoteAddr(t *testing.T) {
+func TestClientIPFromRequestReturnsEmptyForUnparseableRemoteAddr(t *testing.T) {
 	t.Parallel()
 
-	rd := newTestRedirDns(t)
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	req.RemoteAddr = "not-an-address"
 
-	clientID := rd.clientIDFromRequest(req)
-	if clientID != "" {
-		t.Fatalf("clientID = %q, want %q", clientID, "")
+	if got := clientIPFromRequest(req); got != "" {
+		t.Fatalf("clientIPFromRequest = %q, want %q", got, "")
 	}
 }
 
-func TestClientIDFromRequestAcceptsPrivateXFFForAllInternalDeployment(t *testing.T) {
+func TestParseNetPrefixesRejectsInvalidEntry(t *testing.T) {
 	t.Parallel()
 
-	rd := newTestRedirDns(t)
-	// Proxy is trusted; client is also on private space (all-internal deployment).
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
-	}
-	rd.trustedNets = nets
-
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
-	req.RemoteAddr = "10.1.2.3:4321"
-	req.Header.Set("X-Forwarded-For", "192.168.5.10")
-
-	clientID := rd.clientIDFromRequest(req)
-	if clientID != "192.168.5.10" {
-		t.Fatalf("clientID = %q, want %q", clientID, "192.168.5.10")
-	}
-}
-
-func TestClientIDFromRequestFallsBackToXRealIP(t *testing.T) {
-	t.Parallel()
-
-	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
-	}
-	rd.trustedNets = nets
-
-	for _, ip := range []string{"203.0.113.99", "192.168.5.10"} {
-		req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
-		req.RemoteAddr = "10.1.2.3:4321"
-		req.Header.Set("X-Real-IP", ip)
-
-		clientID := rd.clientIDFromRequest(req)
-		if clientID != ip {
-			t.Fatalf("X-Real-IP=%q: clientID = %q, want %q", ip, clientID, ip)
-		}
-	}
-}
-
-func TestClientIDFromRequestXFFTakesPrecedenceOverXRealIP(t *testing.T) {
-	t.Parallel()
-
-	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
-	}
-	rd.trustedNets = nets
-
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
-	req.RemoteAddr = "10.1.2.3:4321"
-	req.Header.Set("X-Forwarded-For", "203.0.113.10")
-	req.Header.Set("X-Real-IP", "203.0.113.99")
-
-	clientID := rd.clientIDFromRequest(req)
-	if clientID != "203.0.113.10" {
-		t.Fatalf("clientID = %q, want %q", clientID, "203.0.113.10")
-	}
-}
-
-func TestParseTrustedProxyPrefixesRejectsInvalidEntry(t *testing.T) {
-	t.Parallel()
-
-	_, err := parseTrustedProxyPrefixes([]string{"not-an-ip"})
+	_, err := parseNetPrefixes([]string{"not-an-ip"})
 	if err == nil {
-		t.Fatalf("expected parseTrustedProxyPrefixes error for invalid entry")
+		t.Fatalf("expected parseNetPrefixes error for invalid entry")
 	}
 }
 
@@ -178,9 +103,9 @@ func TestIsRateLimitBypassed(t *testing.T) {
 	t.Parallel()
 
 	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8", "192.168.1.0/24"})
+	nets, err := parseNetPrefixes([]string{"10.0.0.0/8", "192.168.1.0/24"})
 	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
+		t.Fatalf("parseNetPrefixes returned error: %v", err)
 	}
 	rd.bypassNets = nets
 
@@ -220,9 +145,9 @@ func TestExceedsPerClientHostLimitBypassesConfiguredCIDR(t *testing.T) {
 	t.Parallel()
 
 	rd := newTestRedirDns(t)
-	nets, err := parseTrustedProxyPrefixes([]string{"10.0.0.0/8"})
+	nets, err := parseNetPrefixes([]string{"10.0.0.0/8"})
 	if err != nil {
-		t.Fatalf("parseTrustedProxyPrefixes returned error: %v", err)
+		t.Fatalf("parseNetPrefixes returned error: %v", err)
 	}
 	rd.bypassNets = nets
 	rd.maxHostsPerClient = 1 // would normally block after 1 unique host

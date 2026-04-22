@@ -151,9 +151,6 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	rd.MaxTrackedClients = StringOrInt(repl.ReplaceAll(string(rd.MaxTrackedClients), ""))
 	rd.IPv6PrefixLength = StringOrInt(repl.ReplaceAll(string(rd.IPv6PrefixLength), ""))
 	rd.MaxCacheSize = StringOrInt(repl.ReplaceAll(string(rd.MaxCacheSize), ""))
-	for i, p := range rd.TrustedProxies {
-		rd.TrustedProxies[i] = repl.ReplaceAll(p, "")
-	}
 	for i, ns := range rd.Resolvers {
 		ns = repl.ReplaceAll(ns, "")
 		host, port, splitErr := net.SplitHostPort(ns)
@@ -281,12 +278,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 		rd.lookupFunc = newMiekgLookupFunc(rd.Resolvers, rd.logger)
 	}
 
-	rd.trustedNets, err = parseTrustedProxyPrefixes(rd.TrustedProxies)
-	if err != nil {
-		return err
-	}
-
-	rd.bypassNets, err = parseTrustedProxyPrefixes(rd.RateLimitBypass)
+	rd.bypassNets, err = parseNetPrefixes(rd.RateLimitBypass)
 	if err != nil {
 		return fmt.Errorf("rate_limit_bypass: %w", err)
 	}
@@ -339,7 +331,6 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Duration("per_client_rate_limit_duration", rd.hostLimitWindow),
 			zap.Int("max_tracked_clients", rd.maxTrackedClients),
 			zap.Int("ipv6_prefix_length", rd.ipv6PrefixLen),
-			zap.Int("trusted_proxy_entries", len(rd.TrustedProxies)),
 			zap.Int("rate_limit_bypass_entries", len(rd.RateLimitBypass)),
 			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
@@ -454,14 +445,6 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.MaxCacheSize = StringOrInt(d.Val())
-			case "trusted_proxies":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				rd.TrustedProxies = append(rd.TrustedProxies, d.Val())
-				for d.NextArg() {
-					rd.TrustedProxies = append(rd.TrustedProxies, d.Val())
-				}
 			case "rate_limit_bypass":
 				if !d.NextArg() {
 					return d.ArgErr()
