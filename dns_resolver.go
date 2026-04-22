@@ -61,24 +61,25 @@ const (
 // lookupTXT returns the DNS TXT records for query, serving from the in-memory cache
 // when a fresh entry exists. Concurrent requests for the same query are coalesced by
 // singleflight so that only one upstream DNS lookup is issued regardless of how many
-// requests arrive simultaneously. The returned bool is true when the result was served
-// directly from the outer cache (i.e. no upstream lookup was triggered by this call).
+// requests arrive simultaneously. The returned cacheStatus distinguishes a fresh cache
+// hit (cacheHit), a stale-but-served result (cacheStale), and a full upstream lookup
+// (cacheMiss).
 //
 // When stale_cache_ttl is configured and an expired entry is within the stale window, the
 // stale result is returned immediately and a background refresh is scheduled via
 // DoChan so that at most one upstream lookup is in flight per key.
-func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
+func (rd *RedirDns) lookupTXT(query string) ([]string, error, cacheStatus) {
 	if !rd.cacheEnabled {
 		// Cache is disabled — perform a fresh lookup on every request without
 		// touching the cache at all.
 		txt, err := rd.doLookup(query)
-		return txt, err, false
+		return txt, err, cacheMiss
 	}
 	now := time.Now()
 	txt, err, status := rd.cachedLookup(query, now)
 	switch status {
 	case cacheHit:
-		return txt, err, true
+		return txt, err, cacheHit
 	case cacheStale:
 		// Serve stale immediately and kick off a background refresh.
 		// DoChan deduplicates: if a refresh is already in flight for this key
@@ -88,7 +89,7 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 			return rd.doLookupAndStore(query), nil
 		})
 		go func() { <-ch }()
-		return txt, err, true
+		return txt, err, cacheStale
 	default: // cacheMiss
 		// Synchronous path — block until a fresh result is available.
 		value, _, _ := rd.dnsCache.group.Do(query, func() (any, error) {
@@ -105,7 +106,7 @@ func (rd *RedirDns) lookupTXT(query string) ([]string, error, bool) {
 		// due to an unexpected panic in a concurrent caller), entry is the zero
 		// dnsCacheEntry which is treated as a cache miss rather than crashing
 		entry, _ := value.(dnsCacheEntry)
-		return append([]string(nil), entry.txt...), entry.err, false
+		return append([]string(nil), entry.txt...), entry.err, cacheMiss
 	}
 }
 

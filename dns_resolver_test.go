@@ -37,7 +37,7 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 	if len(txt) != 1 || txt[0] != "https://example.com" {
 		t.Fatalf("unexpected TXT result: %#v", txt)
 	}
-	if cached {
+	if cached != cacheMiss {
 		t.Fatal("first lookup should not be a cache hit")
 	}
 	txt, err, cached = rd.lookupTXT("_redirdns.example.com")
@@ -47,7 +47,7 @@ func TestLookupTXTCachesSuccessAndError(t *testing.T) {
 	if len(txt) != 1 || txt[0] != "https://example.com" {
 		t.Fatalf("unexpected cached TXT result: %#v", txt)
 	}
-	if !cached {
+	if cached == cacheMiss {
 		t.Fatal("second lookup should be a cache hit")
 	}
 	if calls.Load() != 1 {
@@ -396,7 +396,7 @@ func TestLookupTXTStaleWhileRevalidate(t *testing.T) {
 
 	// Prime the cache with a fresh entry.
 	txt, err, cached := rd.lookupTXT("_redirdns.stale.example.com")
-	if err != nil || len(txt) == 0 || cached {
+	if err != nil || len(txt) == 0 || cached != cacheMiss {
 		t.Fatalf("first lookup: txt=%v err=%v cached=%v", txt, err, cached)
 	}
 	if calls.Load() != 1 {
@@ -415,7 +415,7 @@ func TestLookupTXTStaleWhileRevalidate(t *testing.T) {
 	if len(txt2) == 0 || txt2[0] != "https://example.com" {
 		t.Fatalf("stale lookup returned unexpected txt: %v", txt2)
 	}
-	if !cached2 {
+	if cached2 == cacheMiss {
 		t.Fatal("stale lookup should report cached=true")
 	}
 
@@ -441,7 +441,7 @@ func TestLookupTXTStaleWindowExpiredForcesSync(t *testing.T) {
 	}
 
 	// Prime the cache.
-	if _, _, cached := rd.lookupTXT("_redirdns.hardexpiry.example.com"); cached {
+	if _, _, cached := rd.lookupTXT("_redirdns.hardexpiry.example.com"); cached != cacheMiss {
 		t.Fatal("first lookup should not be cached")
 	}
 
@@ -454,7 +454,7 @@ func TestLookupTXTStaleWindowExpiredForcesSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hard-expired lookup returned error: %v", err)
 	}
-	if cached {
+	if cached != cacheMiss {
 		t.Fatal("hard-expired lookup should not report cached=true")
 	}
 	if calls.Load() != 2 {
@@ -485,7 +485,7 @@ func TestLookupTXTStaleCacheTTLDisabledByDefault(t *testing.T) {
 
 	// Must go synchronous (cached=false).
 	_, _, cached := rd.lookupTXT("_redirdns.nostale.example.com")
-	if cached {
+	if cached != cacheMiss {
 		t.Fatal("with stale_cache_ttl disabled, expired entry should not report cached=true")
 	}
 	if calls.Load() != 2 {
@@ -508,7 +508,7 @@ func TestLookupTXTCacheDisabled(t *testing.T) {
 
 	for range 3 {
 		_, _, cached := rd.lookupTXT("_redirdns.nocache.example.com")
-		if cached {
+		if cached != cacheMiss {
 			t.Fatal("cache disabled: lookup should never report cached=true")
 		}
 	}

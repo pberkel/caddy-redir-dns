@@ -152,10 +152,11 @@ type RedirDns struct {
 	// Security note: the template is loaded under the Caddy process's file permissions;
 	// ensure the value is operator-controlled and not derived from untrusted input.
 	ResponseTemplate string `json:"response_template,omitempty"`
-	// When true, an info-level structured log entry is emitted for every request:
-	// successful redirects log as "redirect"; error responses log as "redirect error"
-	// with a reason field. Default: false.
-	LogRedirects bool `json:"log_redirects,omitempty"`
+	// When true, Prometheus metrics are collected for every request: redirects_total (by
+	// status code), errors_total (by reason), cache_lookups_total (by status), and
+	// request_duration_seconds. Requires Caddy to be built with metrics support (default).
+	// Default: false.
+	Metrics bool `json:"metrics,omitempty"`
 	// When true, Cache-Control: max-age=N and Age: N headers are added to successful
 	// redirect responses. max-age is the full TTL of the DNS cache entry; Age is the
 	// number of seconds elapsed since the entry was cached. Default: false.
@@ -169,7 +170,8 @@ type RedirDns struct {
 	// response rendering
 	responseTpl *template.Template
 	logger      *zap.Logger
-	debugKey    []byte // compiled from DebugHeaders at provision time; nil when disabled
+	debugKey    []byte     // compiled from DebugHeaders at provision time; nil when disabled
+	metrics     *rdMetrics // nil when Metrics is false
 
 	// redirect
 	statusCode          int               // explicit numeric code; only used when !statusCodeAuto && !statusCodeHTML
@@ -235,13 +237,8 @@ type hostLimitState struct {
 func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	debug := rd.newRequestDebug(r)
 
-	// extract client IP for access logging when enabled
-	var clientIP string
-	if rd.LogRedirects {
-		clientIP = rd.clientIDFromRequest(r)
-		if clientIP == "" {
-			clientIP = "-"
-		}
+	if rd.metrics != nil {
+		defer rd.metrics.startTimer().ObserveDuration()
 	}
 
 	// extract the host name from the request
@@ -251,20 +248,14 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			c.Write(zap.String("host", r.Host), zap.Error(err))
 		}
 		debug.reason = "invalid_host"
-		if handled, err := rd.redirectToDefault(w, r, clientIP, r.Host, &debug); handled {
-			return err
-		}
-		if rd.LogRedirects {
-			if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
-				c.Write(
-					zap.String("client", clientIP),
-					zap.String("method", r.Method),
-					zap.String("host", r.Host),
-					zap.String("uri", r.RequestURI),
-					zap.Int("status", http.StatusNotFound),
-					zap.String("reason", "invalid_host"),
-				)
+		if handled, herr := rd.redirectToDefault(w, r, r.Host, &debug); handled {
+			if rd.metrics != nil {
+				rd.metrics.recordRedirect(effectiveStatusCode(rd.resolveStatusCode(r.Method)))
 			}
+			return herr
+		}
+		if rd.metrics != nil {
+			rd.metrics.recordError("invalid_host")
 		}
 		debug.writeHeaders(w)
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
@@ -286,20 +277,11 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				zap.Int("max_hosts_per_client", rd.maxHostsPerClient),
 			)
 		}
-		if rd.LogRedirects {
-			if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
-				c.Write(
-					zap.String("client", clientIP),
-					zap.String("method", r.Method),
-					zap.String("host", reqHost),
-					zap.String("uri", r.RequestURI),
-					zap.Int("status", http.StatusTooManyRequests),
-					zap.String("reason", "rate_limited"),
-				)
-			}
-		}
 		debug.reason = "rate_limited"
 		debug.writeHeaders(w)
+		if rd.metrics != nil {
+			rd.metrics.recordError("rate_limited")
+		}
 		return rd.writeHtmlResponse(w, http.StatusTooManyRequests,
 			"Too Many Requests",
 			fmt.Sprintf("This client has triggered DNS lookups for more than %d distinct hostnames within a %s window.", rd.maxHostsPerClient, rd.hostLimitWindow),
@@ -311,13 +293,16 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	// create DNS TXT query and perform lookup
 	txtQuery := rd.DnsPrefix + "." + reqHost
 	debug.query = txtQuery
-	txtRecord, err, cached := rd.lookupTXT(txtQuery)
+	txtRecord, err, cacheResult := rd.lookupTXT(txtQuery)
 	debug.hasCached = true
-	debug.cached = cached
+	debug.cached = cacheResult != cacheMiss
 	debug.records = append([]string(nil), txtRecord...)
 	if ttl, ok := rd.remainingCacheTTL(txtQuery); ok {
 		debug.hasCacheTTL = true
 		debug.cacheTTL = ttl
+	}
+	if rd.metrics != nil {
+		rd.metrics.recordCacheLookup(cacheResult)
 	}
 
 	// check if the DNS lookup returned a response
@@ -331,8 +316,11 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		}
 		// DNS lookup returned no / invalid response
 		debug.reason = "dns_lookup_failed"
-		if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost, &debug); handled {
-			return err
+		if handled, herr := rd.redirectToDefault(w, r, reqHost, &debug); handled {
+			if rd.metrics != nil {
+				rd.metrics.recordRedirect(effectiveStatusCode(rd.resolveStatusCode(r.Method)))
+			}
+			return herr
 		}
 		var dnsDetail string
 		if err != nil {
@@ -340,17 +328,8 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 		} else {
 			dnsDetail = fmt.Sprintf("No TXT records found at %s.", txtQuery)
 		}
-		if rd.LogRedirects {
-			if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
-				c.Write(
-					zap.String("client", clientIP),
-					zap.String("method", r.Method),
-					zap.String("host", reqHost),
-					zap.String("uri", r.RequestURI),
-					zap.Int("status", http.StatusNotFound),
-					zap.String("reason", "dns_lookup_failed"),
-				)
-			}
+		if rd.metrics != nil {
+			rd.metrics.recordError("dns_lookup_failed")
 		}
 		debug.writeHeaders(w)
 		return rd.writeHtmlResponse(w, http.StatusNotFound,
@@ -374,22 +353,6 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			)
 		}
 		if targetUrl != "" {
-			if rd.LogRedirects {
-				logStatus := statusCode
-				if logStatus == htmlRedirectCode {
-					logStatus = http.StatusOK
-				}
-				if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
-					c.Write(
-						zap.String("client", clientIP),
-						zap.String("method", r.Method),
-						zap.String("host", reqHost),
-						zap.String("uri", r.RequestURI),
-						zap.String("target", targetUrl),
-						zap.Int("status", logStatus),
-					)
-				}
-			}
 			if rd.HTTPCacheControl {
 				if maxAge, age, ok := rd.cacheTiming(txtQuery); ok {
 					w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", int(maxAge.Seconds())))
@@ -398,6 +361,9 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			}
 			debug.reason = "redirect"
 			debug.writeHeaders(w)
+			if rd.metrics != nil {
+				rd.metrics.recordRedirect(effectiveStatusCode(statusCode))
+			}
 			if statusCode == htmlRedirectCode {
 				return writeHtmlRedirectResponse(w, targetUrl)
 			}
@@ -407,21 +373,15 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 
 	// none of the TXT records contained a valid redirect
 	debug.reason = "no_valid_txt_record"
-	if handled, err := rd.redirectToDefault(w, r, clientIP, reqHost, &debug); handled {
-		return err
+	if handled, herr := rd.redirectToDefault(w, r, reqHost, &debug); handled {
+		if rd.metrics != nil {
+			rd.metrics.recordRedirect(effectiveStatusCode(rd.resolveStatusCode(r.Method)))
+		}
+		return herr
 	}
 
-	if rd.LogRedirects {
-		if c := rd.logger.Check(zapcore.InfoLevel, "redirect error"); c != nil {
-			c.Write(
-				zap.String("client", clientIP),
-				zap.String("method", r.Method),
-				zap.String("host", reqHost),
-				zap.String("uri", r.RequestURI),
-				zap.Int("status", http.StatusNotFound),
-				zap.String("reason", "no_valid_txt_record"),
-			)
-		}
+	if rd.metrics != nil {
+		rd.metrics.recordError("no_valid_txt_record")
 	}
 	debug.writeHeaders(w)
 	return rd.writeHtmlResponse(w, http.StatusNotFound,
@@ -433,30 +393,13 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 			"URLs must not include credentials (user:pass@host).")
 }
 
-// redirectToDefault redirects to DefaultTarget when configured, logging the
-// redirect if log_redirects is enabled. Reports whether the redirect was
-// written so the caller can return immediately.
-func (rd *RedirDns) redirectToDefault(w http.ResponseWriter, r *http.Request, clientIP, host string, debug *requestDebug) (bool, error) {
+// redirectToDefault redirects to DefaultTarget when configured. Reports whether
+// the redirect was written so the caller can return immediately.
+func (rd *RedirDns) redirectToDefault(w http.ResponseWriter, r *http.Request, host string, debug *requestDebug) (bool, error) {
 	if rd.DefaultTarget == "" {
 		return false, nil
 	}
 	code := rd.resolveStatusCode(r.Method)
-	if rd.LogRedirects {
-		logStatus := code
-		if logStatus == htmlRedirectCode {
-			logStatus = http.StatusOK
-		}
-		if c := rd.logger.Check(zapcore.InfoLevel, "redirect"); c != nil {
-			c.Write(
-				zap.String("client", clientIP),
-				zap.String("method", r.Method),
-				zap.String("host", host),
-				zap.String("uri", r.RequestURI),
-				zap.String("target", rd.DefaultTarget),
-				zap.Int("status", logStatus),
-			)
-		}
-	}
 	debug.writeHeaders(w)
 	if code == htmlRedirectCode {
 		return true, writeHtmlRedirectResponse(w, rd.DefaultTarget)
@@ -742,6 +685,16 @@ func isValidAbsoluteURL(location string) bool {
 	}
 	// must have a non-empty host
 	return parsedUrl.Host != ""
+}
+
+// effectiveStatusCode converts the internal htmlRedirectCode sentinel (-1) to the
+// actual HTTP status it produces (200 OK), leaving all other codes unchanged.
+// Used to normalise the code value before recording it as a metric label.
+func effectiveStatusCode(code int) int {
+	if code == htmlRedirectCode {
+		return http.StatusOK
+	}
+	return code
 }
 
 func isSupportedStatusCode(code int) bool {

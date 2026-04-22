@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.7.0 — 2026-04-23
+
+### Added
+- `metrics` configuration flag enables Prometheus metrics collection. When set, four metrics are registered on the Caddy metrics registry under the `caddy_redir_dns_` namespace:
+  - `caddy_redir_dns_redirects_total{code}` — total redirect responses issued, labelled by HTTP status code (e.g. `301`, `302`, `200` for HTML-mode redirects).
+  - `caddy_redir_dns_errors_total{reason}` — total error responses issued, labelled by reason: `invalid_host`, `rate_limited`, `dns_lookup_failed`, or `no_valid_txt_record`.
+  - `caddy_redir_dns_cache_lookups_total{status}` — total DNS cache lookup outcomes, labelled by status: `hit` (fresh cache entry served), `stale` (expired entry served while background refresh is triggered), or `miss` (upstream lookup performed).
+  - `caddy_redir_dns_request_duration_seconds` — histogram of handler processing duration (from start of `ServeHTTP` to response written).
+
+  When two `redir_dns` instances are provisioned (one for `https://` and one for `http://`), both share the same metric collectors via the AlreadyRegisteredError reuse pattern — no double-counting occurs.
+
+  Metrics are scraped from the standard Caddy `/metrics` endpoint. Disabled by default.
+
+### Changed
+- **Breaking:** `log_redirects` configuration flag removed. It emitted structured log entries for every request; replace with `metrics` for production observability (structured per-request logging at info level was too noisy under load and did not integrate with dashboards). Debug-level logging for individual DNS lookups and TXT record evaluations is unchanged.
+
+---
+
 ## v1.6.0 — 2026-04-22
 
 ### Added

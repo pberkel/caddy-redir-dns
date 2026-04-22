@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/caddyserver/caddy/v2 v2.11.1
 	github.com/miekg/dns v1.1.72
+	github.com/prometheus/client_golang v1.23.2
 	go.uber.org/zap v1.27.1
 	golang.org/x/sync v0.19.0
 )
@@ -72,7 +73,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect

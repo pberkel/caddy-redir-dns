@@ -317,6 +317,12 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			return err
 		}
 	}
+	if rd.Metrics {
+		if registry := ctx.GetMetricsRegistry(); registry != nil {
+			rd.metrics = initMetrics(registry)
+		}
+	}
+
 	if c := rd.logger.Check(zapcore.InfoLevel, "provisioned module"); c != nil {
 		c.Write(
 			zap.String("default_target", rd.DefaultTarget),
@@ -338,6 +344,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Int("resolvers_count", len(rd.Resolvers)),
 			zap.String("response_template", rd.ResponseTemplate),
 			zap.Bool("cache", rd.cacheEnabled),
+			zap.Bool("metrics", rd.metrics != nil),
 			zap.Bool("debug_headers", len(rd.debugKey) > 0),
 			zap.Bool("http_cache_control", rd.HTTPCacheControl),
 		)
@@ -476,8 +483,8 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				rd.ResponseTemplate = d.Val()
-			case "log_redirects":
-				rd.LogRedirects = true
+			case "metrics":
+				rd.Metrics = true
 			case "debug_headers":
 				if !d.NextArg() {
 					return d.ArgErr()

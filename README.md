@@ -49,7 +49,7 @@ Several optional parameters are also supported:
 		# Response parameters
 		response_template       /etc/caddy/error.html
 		http_cache_control
-		log_redirects
+		metrics
 		debug_headers           my-secret-key
 	}
 }
@@ -105,7 +105,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 | Parameter | Default | Description |
 |---|---|---|
 | `response_template` | built-in | Custom error page: a file path or inline [Go html/template](https://pkg.go.dev/html/template) string. Resolved at provision time — file content is used when readable; the value is used as a literal template otherwise; any other file error is a hard failure. Template fields: `.Title`, `.Detail`, `.Resolution`. See `examples/error_template.html`. |
-| `log_redirects` | `false` | Emit a structured info-level log entry for every request. Successful redirects log as `redirect`; errors as `redirect error` with fields `client`, `method`, `host`, `uri`, `status`, `target` (redirects only), `reason` (errors only). |
+| `metrics` | `false` | Expose Prometheus metrics. When enabled, the following metrics are emitted under the `caddy_redir_dns_` namespace: `redirects_total{code}` (redirect responses by HTTP status code), `errors_total{reason}` (error responses by reason: `invalid_host`, `rate_limited`, `dns_lookup_failed`, `no_valid_txt_record`), `cache_lookups_total{status}` (cache outcomes: `hit`, `miss`, `stale`), `request_duration_seconds` (handler latency histogram). Requires Caddy to be built with metrics support (enabled by default). Metrics are scraped from the standard Caddy `/metrics` endpoint. |
 | `http_cache_control` | `false` | Add `Cache-Control: max-age=N` and `Age: N` headers to successful redirect responses. `max-age` is the full TTL of the DNS cache entry; `Age` is the number of seconds elapsed since the entry was cached. Not added to error responses (404, 429). |
 | `debug_headers` | — | Secret key for opt-in diagnostic response headers. Requests carrying `X-Debug-Key: <key>` with a matching value receive the headers below. Key is constant-time compared. |
 
