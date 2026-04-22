@@ -14,7 +14,7 @@ func TestUnmarshalCaddyfileParsesLookupTimeoutAndMinCacheTTL(t *testing.T) {
 redir_dns {
 	lookup_timeout 750ms
 	min_cache_ttl 45s
-	per_ip_rate_limit 77 90s
+	per_client_rate_limit 77 90s
 	trusted_proxies 10.0.0.0/8 192.168.0.0/16
 }
 `)
@@ -28,14 +28,14 @@ redir_dns {
 	if rd.MinCacheTTL != "45s" {
 		t.Fatalf("min_cache_ttl = %q, want %q", rd.MinCacheTTL, "45s")
 	}
-	if rd.PerIPRateLimit == nil {
-		t.Fatal("per_ip_rate_limit should not be nil")
+	if rd.PerClientRateLimit == nil {
+		t.Fatal("per_client_rate_limit should not be nil")
 	}
-	if rd.PerIPRateLimit.Duration != "90s" {
-		t.Fatalf("per_ip_rate_limit duration = %q, want %q", rd.PerIPRateLimit.Duration, "90s")
+	if rd.PerClientRateLimit.Duration != "90s" {
+		t.Fatalf("per_client_rate_limit duration = %q, want %q", rd.PerClientRateLimit.Duration, "90s")
 	}
-	if rd.PerIPRateLimit.Limit != "77" {
-		t.Fatalf("per_ip_rate_limit limit = %q, want %q", rd.PerIPRateLimit.Limit, "77")
+	if rd.PerClientRateLimit.Limit != "77" {
+		t.Fatalf("per_client_rate_limit limit = %q, want %q", rd.PerClientRateLimit.Limit, "77")
 	}
 	if len(rd.TrustedProxies) != 2 {
 		t.Fatalf("trusted proxies length = %d, want %d", len(rd.TrustedProxies), 2)
@@ -97,6 +97,27 @@ redir_dns {
 	}
 	if !rd.Cache {
 		t.Fatal("cache = false, want true")
+	}
+}
+
+func TestUnmarshalCaddyfileRateLimit(t *testing.T) {
+	t.Parallel()
+
+	rd := New()
+	d := caddyfile.NewTestDispenser(`
+redir_dns {
+	rate_limit true
+	ipv6_prefix_length 48
+}
+`)
+	if err := rd.UnmarshalCaddyfile(d); err != nil {
+		t.Fatalf("UnmarshalCaddyfile returned error: %v", err)
+	}
+	if !rd.RateLimit {
+		t.Fatal("rate_limit = false, want true")
+	}
+	if rd.IPv6PrefixLength != "48" {
+		t.Fatalf("ipv6_prefix_length = %q, want %q", rd.IPv6PrefixLength, "48")
 	}
 }
 

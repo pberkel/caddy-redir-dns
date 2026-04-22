@@ -11,13 +11,13 @@
 
 ### Added
 - `max_cache_ttl` configuration parameter (default: `1h`) caps the TTL honoured from the DNS record for in-memory cache entries. Without this, a record with a very long DNS TTL (e.g. `86400s`) would be cached for the full duration without any updates being reflected. The effective cache TTL for a successful lookup is `clamp(max(min_cache_ttl, dnsTTL), min_cache_ttl, max_cache_ttl)`. Must be ≥ `min_cache_ttl`. Accepts a Go duration string or a Caddy global placeholder (e.g. `{env.MAX_CACHE_TTL}`).
-- `per_ip_rate_limit <limit> <duration>` configuration directive replaces the separate `host_limit_window` and `max_hosts_per_client` parameters. The two positional arguments follow the same `<limit> <duration>` convention used by `caddy-tls-issuer-rate-limit`, making the rate-limit intent immediately visible at a glance. Both arguments accept Caddy global placeholders.
-- `max_tracked_ips` configuration parameter replaces `max_tracked_clients`. The rename clarifies that tracking is per client IP address, consistent with the new `per_ip_rate_limit` naming.
+- `per_client_rate_limit <limit> <duration>` configuration directive replaces the separate `host_limit_window` and `max_hosts_per_client` parameters. The two positional arguments follow the same `<limit> <duration>` convention used by `caddy-tls-issuer-rate-limit`, making the rate-limit intent immediately visible at a glance. Both arguments accept Caddy global placeholders.
+- `max_tracked_clients` configuration parameter replaces `max_tracked_ips`. The rename aligns with the broader shift to "client" terminology (an IPv6 client may now represent a prefix, not a single IP), consistent with the new `per_client_rate_limit` naming.
 
 ### Changed
 - **Breaking:** `cache_ttl` Caddyfile directive and JSON field has been renamed to `min_cache_ttl`. The behaviour is unchanged — it sets the minimum cache TTL for successful lookups, with the DNS record TTL taking precedence when larger. The rename makes this floor semantics explicit. Update existing configs: `cache_ttl 30s` → `min_cache_ttl 30s`.
-- **Breaking:** `host_limit_window` and `max_hosts_per_client` Caddyfile directives and JSON fields have been removed and replaced by `per_ip_rate_limit`. Update existing configs: `host_limit_window 1m` + `max_hosts_per_client 50` → `per_ip_rate_limit 50 1m`.
-- **Breaking:** `max_tracked_clients` Caddyfile directive and JSON field has been renamed to `max_tracked_ips`.
+- **Breaking:** `host_limit_window` and `max_hosts_per_client` Caddyfile directives and JSON fields have been removed and replaced by `per_client_rate_limit`. Update existing configs: `host_limit_window 1m` + `max_hosts_per_client 50` → `per_client_rate_limit 100 1m`.
+- **Breaking:** `max_tracked_ips` Caddyfile directive and JSON field has been renamed to `max_tracked_clients`.
 
 ---
 

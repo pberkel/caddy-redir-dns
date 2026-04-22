@@ -16,10 +16,13 @@ const (
 	defaultHostLimitWindow = time.Minute
 
 	// Default maximum unique hosts per client in a window
-	defaultMaxHostsPerClient = 50
+	defaultMaxHostsPerClient = 100
 
 	// Default maximum number of tracked per-IP rate-limit entries
-	defaultMaxTrackedIPs = 100_000
+	defaultMaxTrackedClients = 100_000
+
+	// Default IPv6 prefix length for rate-limit grouping (one slot per /64 — typical per-host allocation)
+	defaultIPv6PrefixLength = 64
 
 	// Maximum number of bytes examined in an X-Forwarded-For header. The
 	// right-to-left walk only needs the tail of the header (the most recently
@@ -75,9 +78,13 @@ func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now 
 	if clientID == "" {
 		return true // fail-closed: unparseable remote address
 	}
-	if len(rd.bypassNets) > 0 {
-		if addr, err := netip.ParseAddr(clientID); err == nil && rd.isRateLimitBypassed(addr) {
+	if addr, err := netip.ParseAddr(clientID); err == nil {
+		if len(rd.bypassNets) > 0 && rd.isRateLimitBypassed(addr) {
 			return false
+		}
+		// group IPv6 clients by prefix to prevent prefix-rotation attacks
+		if addr.Is6() && !addr.Is4In6() && rd.ipv6PrefixLen < 128 {
+			clientID = netip.PrefixFrom(addr, rd.ipv6PrefixLen).Masked().String()
 		}
 	}
 

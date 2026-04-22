@@ -25,28 +25,32 @@ Several optional parameters are also supported:
 ```caddyfile
 :80 {
 	redir_dns {
-		default_target       https://www.example.com
-		status_code          temporary
-		dns_prefix           _redirdns
-
-		resolvers            1.1.1.1 8.8.8.8
-		lookup_timeout       2s
-		cache                true
-		min_cache_ttl        30s
-		max_cache_ttl        1h
-		negative_cache_ttl   5s
-		stale_cache_ttl      30s
-		max_cache_size       10_000
-
-		per_ip_rate_limit    50 1m
-		max_tracked_ips      100_000
-		trusted_proxies      10.0.0.0/8 192.168.1.1/32
-		rate_limit_bypass    192.168.0.0/16 192.168.2.1/32
-
-		response_template    /etc/caddy/error.html
+		# Redirect parameters
+		default_target          https://www.example.com
+		status_code             temporary
+		dns_prefix              _redirdns
+		# DNS parameters
+		resolvers               1.1.1.1 8.8.8.8
+		lookup_timeout          2s
+		# Cache parameters
+		cache                   true
+		min_cache_ttl           30s
+		max_cache_ttl           1h
+		negative_cache_ttl      5s
+		stale_cache_ttl         30s
+		max_cache_size          10_000
+		# Rate limit parameters
+		rate_limit              true
+		per_client_rate_limit   100 1m
+		max_tracked_clients     100_000
+		ipv6_prefix_length      64
+		trusted_proxies         10.0.0.0/8 192.168.1.1/32
+		rate_limit_bypass       192.168.0.0/16 192.168.2.1/32
+		# Response parameters
+		response_template       /etc/caddy/error.html
 		http_cache_control
 		log_redirects
-		debug_headers        my-secret-key
+		debug_headers           my-secret-key
 	}
 }
 ```
@@ -89,8 +93,10 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 
 | Parameter | Default | Description |
 |---|---|---|
-| `per_ip_rate_limit` | `50 1m` | Per-client rate limit: `<limit> <duration>`. Maximum distinct hostnames a single IP may trigger first-time DNS lookups for within the sliding window. Repeat lookups for a hostname already seen in the window are always free. Exceeding the limit falls back to `default_target` or returns `429`. Both values accept Caddy global placeholders. |
-| `max_tracked_ips` | `100_000` | Maximum number of per-IP tracking entries held in memory. An arbitrary entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
+| `rate_limit` | `false` | Enable per-client DNS lookup rate limiting. When `false` (default) all requests pass through regardless of how many distinct hostnames they trigger. Set to `true` on public deployments to guard against DNS amplification from a single client. The remaining rate-limit parameters only take effect when `rate_limit true` is set. |
+| `per_client_rate_limit` | `100 1m` | Per-client rate limit: `<limit> <duration>`. Maximum distinct hostnames a single IP may trigger first-time DNS lookups for within the sliding window. Repeat lookups for a hostname already seen in the window are always free. Exceeding the limit falls back to `default_target` or returns `429`. Both values accept Caddy global placeholders. |
+| `max_tracked_clients` | `100_000` | Maximum number of per-IP tracking entries held in memory. An arbitrary entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
+| `ipv6_prefix_length` | `64` | IPv6 prefix length used to group client addresses for rate limiting. Clients within the same prefix are counted as a single entity, preventing prefix-rotation attacks where an attacker cycles through a large IPv6 block to evade per-IP limits. Has no effect on IPv4 addresses. Accepts values between `1` and `128`; use `128` to track each IPv6 address individually. |
 | `trusted_proxies` | — | CIDRs or IPs allowed to supply the client address via `X-Forwarded-For` or `X-Real-IP`. `X-Forwarded-For` is walked right-to-left to find the rightmost non-trusted entry; `X-Real-IP` is used as a fallback. Both headers are ignored when the direct peer is not trusted. |
 | `rate_limit_bypass` | — | CIDRs or IPs exempt from the per-client DNS lookup rate limit. Accepts the same format as `trusted_proxies`. The resolved client IP (after `trusted_proxies` unwrapping) is matched against this list. Useful for load testing, internal health checks, or other known trusted clients. |
 

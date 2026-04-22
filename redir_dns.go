@@ -113,17 +113,27 @@ type RedirDns struct {
 
 	// --- DNS lookup guard ---
 
+	// Whether to enforce the per-client DNS lookup rate limit. When false (the default)
+	// all requests are allowed through regardless of how many distinct hostnames they
+	// trigger. Set to true to enable the per-IP rate limit. Default: false.
+	RateLimit bool `json:"rate_limit,omitempty"`
 	// Per-client rate limit: maximum distinct hostnames a single IP may trigger
 	// first-time DNS lookups for within the sliding window. Takes two positional
 	// arguments: <limit> <duration> (e.g. "50 1m"). Repeat lookups for a hostname
 	// already seen within the window are always free. Exceeding the limit falls back
 	// to default_target or returns 429. Default: 50 1m.
 	// Both values accept Caddy global placeholders (e.g. "{env.PER_IP_LIMIT}").
-	PerIPRateLimit *PerIPRateLimit `json:"per_ip_rate_limit,omitempty"`
+	PerClientRateLimit *PerClientRateLimit `json:"per_client_rate_limit,omitempty"`
 	// Maximum number of per-IP trackers held in memory. An arbitrary entry is evicted
 	// when the cap is reached, preventing unbounded growth under rotating-IP traffic.
 	// Default: 100000. Accepts a bare integer or a quoted string (e.g. "{env.MAX_TRACKED_IPS}").
-	MaxTrackedIPs StringOrInt `json:"max_tracked_ips,omitempty"`
+	MaxTrackedClients StringOrInt `json:"max_tracked_clients,omitempty"`
+	// IPv6 prefix length used to group client addresses for rate limiting. IPv6 clients
+	// within the same prefix are counted as a single entity, preventing prefix-rotation
+	// attacks where an attacker cycles through a large address block to evade per-IP limits.
+	// Has no effect on IPv4 addresses. Default: 64 (typical per-host allocation boundary).
+	// Accepts a bare integer or a quoted string (e.g. "{env.IPV6_PREFIX_LENGTH}").
+	IPv6PrefixLength StringOrInt `json:"ipv6_prefix_length,omitempty"`
 	// Trusted proxy CIDRs or IPs allowed to supply client IP via X-Forwarded-For
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 	// CIDRs or IPs that are exempt from the per-client DNS lookup rate limit.
@@ -185,6 +195,8 @@ type RedirDns struct {
 	maxTrackedClients int
 	hostLimitWindow   time.Duration
 	maxHostsPerClient int
+	ipv6PrefixLen     int  // runtime copy of IPv6PrefixLength; default 64 in New()
+	rateLimitEnabled  bool // runtime copy of RateLimit; true in New() so tests work without Provision
 	trustedNets       []netip.Prefix
 	bypassNets        []netip.Prefix
 }
@@ -199,10 +211,10 @@ type dnsCache struct {
 	group   singleflight.Group
 }
 
-// PerIPRateLimit defines the per-client distinct-hostname DNS lookup rate limit.
+// PerClientRateLimit defines the per-client distinct-hostname DNS lookup rate limit.
 // It mirrors the RateLimit type in caddy-tls-issuer-rate-limit: two fields, same
 // positional Caddyfile syntax (<limit> <duration>).
-type PerIPRateLimit struct {
+type PerClientRateLimit struct {
 	// Maximum distinct hostnames per client within Duration. Default: 50
 	Limit StringOrInt `json:"limit,omitempty"`
 	// Sliding window duration. Default: 1m
@@ -266,7 +278,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	debug.host = reqHost
 
 	// check if client has exceeded the per-client distinct-hostname DNS lookup limit
-	if rd.exceedsPerClientHostLimit(r, reqHost, time.Now()) {
+	if rd.rateLimitEnabled && rd.exceedsPerClientHostLimit(r, reqHost, time.Now()) {
 		if c := rd.logger.Check(zapcore.DebugLevel, "DNS lookup skipped: client exceeded per-client host limit"); c != nil {
 			c.Write(
 				zap.String("host", reqHost),

@@ -317,3 +317,57 @@ func TestCleanupHostLimitStateRemovesExpiredHostsButKeepsTracker(t *testing.T) {
 		t.Fatal("expected recent host entry to be retained")
 	}
 }
+
+func TestExceedsPerClientHostLimitIPv6PrefixGrouping(t *testing.T) {
+	t.Parallel()
+
+	// Two addresses within the same /48 should share a tracker slot.
+	rd := newTestRedirDns(t)
+	rd.maxHostsPerClient = 1
+	rd.hostLimitWindow = time.Minute
+	rd.ipv6PrefixLen = 48
+
+	now := time.Now()
+	makeReq := func(addr string) *http.Request {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.RemoteAddr = "[" + addr + "]:12345"
+		return req
+	}
+
+	// First address in 2001:db8:1::/48 — consumes the one allowed slot.
+	rd.exceedsPerClientHostLimit(makeReq("2001:db8:1::1"), "a.example.com", now)
+
+	// Second address in the same /48 — should be rate-limited (shared slot).
+	if !rd.exceedsPerClientHostLimit(makeReq("2001:db8:1::2"), "b.example.com", now) {
+		t.Fatal("expected second address in same /48 to be rate-limited")
+	}
+
+	// Address in a different /48 — should get its own slot and be allowed.
+	if rd.exceedsPerClientHostLimit(makeReq("2001:db8:2::1"), "c.example.com", now) {
+		t.Fatal("expected address in different /48 to be allowed")
+	}
+}
+
+func TestExceedsPerClientHostLimitIPv4UnaffectedByIPv6Prefix(t *testing.T) {
+	t.Parallel()
+
+	// IPv4 addresses must not be grouped by ipv6_prefix_length.
+	rd := newTestRedirDns(t)
+	rd.maxHostsPerClient = 1
+	rd.hostLimitWindow = time.Minute
+	rd.ipv6PrefixLen = 48
+
+	now := time.Now()
+	makeReq := func(addr string) *http.Request {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.RemoteAddr = addr + ":12345"
+		return req
+	}
+
+	rd.exceedsPerClientHostLimit(makeReq("203.0.113.1"), "a.example.com", now)
+
+	// Different IPv4 address — must get its own independent tracker slot.
+	if rd.exceedsPerClientHostLimit(makeReq("203.0.113.2"), "b.example.com", now) {
+		t.Fatal("IPv4 addresses must not share a tracker slot due to ipv6_prefix_length")
+	}
+}

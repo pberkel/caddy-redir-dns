@@ -641,15 +641,15 @@ func TestProvisionRejectsInvalidConstraints(t *testing.T) {
 	}
 
 	rd = New()
-	rd.PerIPRateLimit.Duration = "0"
+	rd.PerClientRateLimit.Duration = "0"
 	if err := rd.Provision(caddyCtx); err == nil {
-		t.Fatalf("expected provision error for zero per_ip_rate_limit duration")
+		t.Fatalf("expected provision error for zero per_client_rate_limit duration")
 	}
 
 	rd = New()
-	rd.PerIPRateLimit.Limit = "0"
+	rd.PerClientRateLimit.Limit = "0"
 	if err := rd.Provision(caddyCtx); err == nil {
-		t.Fatalf("expected provision error for zero per_ip_rate_limit limit")
+		t.Fatalf("expected provision error for zero per_client_rate_limit limit")
 	}
 }
 
