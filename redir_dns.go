@@ -119,9 +119,9 @@ type RedirDns struct {
 	RateLimit bool `json:"rate_limit,omitempty"`
 	// Per-client rate limit: maximum distinct hostnames a single IP may trigger
 	// first-time DNS lookups for within the sliding window. Takes two positional
-	// arguments: <limit> <duration> (e.g. "50 1m"). Repeat lookups for a hostname
-	// already seen within the window are always free. Exceeding the limit falls back
-	// to default_target or returns 429. Default: 50 1m.
+	// arguments: <limit> <duration> (e.g. "50 30s"). Repeat lookups for a hostname
+	// already seen within the window are always free. Exceeding the limit returns
+	// HTTP 429. Default: 100 1m.
 	// Both values accept Caddy global placeholders (e.g. "{env.PER_IP_LIMIT}").
 	PerClientRateLimit *PerClientRateLimit `json:"per_client_rate_limit,omitempty"`
 	// Maximum number of per-IP trackers held in memory. An arbitrary entry is evicted
@@ -600,7 +600,7 @@ func normalizeRequestHost(host string) (string, error) {
 	if err != nil {
 		reqHost = host
 	}
-	reqHost = strings.TrimSpace(strings.Trim(reqHost, "[]"))
+	reqHost = strings.TrimSpace(reqHost)
 	reqHost = strings.TrimSuffix(reqHost, ".")
 	if reqHost == "" {
 		return "", fmt.Errorf("empty host header")

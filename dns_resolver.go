@@ -308,8 +308,11 @@ func newMiekgLookupFunc(resolvers []string, logger *zap.Logger) func(context.Con
 				)
 			}
 			if resp.Rcode == dns.RcodeNameError {
-				// NXDOMAIN — record does not exist; no point querying remaining servers
-				return nil, 0, "", errNoTXTRecord
+				// NXDOMAIN from one resolver is not treated as terminal — a later
+				// resolver in the list may have the record (e.g. split-horizon DNS
+				// or a resolver with more complete data). If all resolvers are
+				// exhausted without a result the loop falls through to errNoTXTRecord.
+				continue
 			}
 			if resp.Rcode != dns.RcodeSuccess {
 				lastErr = fmt.Errorf("resolver %s returned rcode %s", ns, dns.RcodeToString[resp.Rcode])

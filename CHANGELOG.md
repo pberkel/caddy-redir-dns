@@ -30,6 +30,11 @@
 
   When no `servers { trusted_proxies ... }` block is configured (including in environments without a reverse proxy), `caddy-redir-dns` falls back to `r.RemoteAddr` as the client identifier — the same behaviour as before for direct-connect deployments.
 
+### Fixed
+- Custom DNS resolver failover now continues past an NXDOMAIN response from one resolver so later configured resolvers can still provide TXT records, which is useful for split-horizon DNS or resolvers with different propagation state.
+- Host validation no longer strips leading or trailing brackets from malformed Host headers before DNS-name validation, so values such as `[example.com`, `example.com]`, and `[example.com]` are rejected instead of being normalised to `example.com`.
+- Documentation now states that exceeding `per_client_rate_limit` returns HTTP 429, matching the current runtime behaviour.
+
 ---
 
 ## v1.6.0 — 2026-04-22

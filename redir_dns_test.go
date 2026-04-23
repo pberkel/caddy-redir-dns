@@ -102,6 +102,10 @@ func TestNormalizeRequestHost(t *testing.T) {
 		{name: "empty host", input: "", wantErr: true},
 		{name: "ip host", input: "127.0.0.1", wantErr: true},
 		{name: "invalid character", input: "exa_mple.com", wantErr: true},
+		{name: "missing closing bracket", input: "[example.com", wantErr: true},
+		{name: "unexpected closing bracket", input: "example.com]", wantErr: true},
+		{name: "bracketed hostname", input: "[example.com]", wantErr: true},
+		{name: "bracketed ipv6 with port", input: "[2001:db8::1]:443", wantErr: true},
 	}
 
 	for _, tt := range tests {

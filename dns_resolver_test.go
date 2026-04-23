@@ -322,6 +322,42 @@ func TestMiekgLookupTXTNXDOMAIN(t *testing.T) {
 	}
 }
 
+func TestMiekgLookupTXTFallsThroughNXDOMAINResolver(t *testing.T) {
+	t.Parallel()
+
+	nxdomainMux := dns.NewServeMux()
+	nxdomainMux.HandleFunc("_redirect.www.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	nxdomainAddr := startTestDNSServer(t, nxdomainMux)
+
+	txtMux := dns.NewServeMux()
+	txtMux.HandleFunc("_redirect.www.example.com.", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{
+			&dns.TXT{
+				Hdr: dns.RR_Header{Name: "_redirect.www.example.com.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+				Txt: []string{"https://www.new-domain.com"},
+			},
+		}
+		w.WriteMsg(m) //nolint:errcheck
+	})
+	txtAddr := startTestDNSServer(t, txtMux)
+
+	lookupFunc := newMiekgLookupFunc([]string{nxdomainAddr, txtAddr}, zap.NewNop())
+	records, _, err := lookupFunc(context.Background(), "_redirect.www.example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(records) != 1 || records[0] != "https://www.new-domain.com" {
+		t.Fatalf("unexpected records: %v", records)
+	}
+}
+
 func TestMiekgLookupTXTCNAMELoopExceedsMaxDepth(t *testing.T) {
 	t.Parallel()
 
