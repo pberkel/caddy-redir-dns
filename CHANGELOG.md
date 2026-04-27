@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `per_client_rate_limit` window is now a fixed window rather than a sliding one. Previously the background cleanup goroutine iterated all tracked clients and their host entries under the mutex (O(clients × hosts)), and the request path ran an additional per-entry expiry sweep on every call. Both are replaced by a single map reset at each window boundary: all per-client state is discarded atomically, dropping lock hold time from O(n×m) to O(1) and eliminating the per-request sweep entirely. Tradeoff: a client can observe up to 2× `max_hosts_per_client` distinct hosts across a window boundary. For an abuse-prevention limiter this is acceptable.
+
+---
+
 ## v1.7.0 — 2026-04-23
 
 ### Added

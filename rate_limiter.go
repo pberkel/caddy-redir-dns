@@ -27,26 +27,29 @@ const (
 )
 
 // hostTracker records the set of distinct hostnames a single client has triggered DNS
-// lookups for within the current host-limit window, together with the time each was
-// last seen. lastSeen is updated on every request and is used by the background cleanup
-// goroutine to identify trackers idle for longer than hostLimitWindow.
+// lookups for within the current host-limit window. The map is keyed by hostname;
+// the value is an empty struct since timestamps are not needed — the entire trackers
+// map is reset at the end of each window by the background cleanup goroutine.
 type hostTracker struct {
-	hosts    map[string]time.Time // hostname → time last requested
-	lastSeen time.Time
+	hosts map[string]struct{}
 }
 
-// startHostLimitCleanup starts a background goroutine that periodically purges
-// expired host-limit state. It shuts down when the provisioning context is
-// cancelled (i.e. when Caddy replaces or stops this module instance).
+// startHostLimitCleanup starts a background goroutine that resets all host-limit
+// state once per window. Resetting the entire map is O(1) under the lock and avoids
+// per-entry timestamp comparisons. The tradeoff is that the window is hard-aligned
+// to the ticker start time rather than sliding per client: a client can observe up
+// to 2× maxHostsPerClient unique hosts across a window boundary.
+// The goroutine shuts down when the provisioning context is cancelled (i.e. when
+// Caddy replaces or stops this module instance).
 func (rd *RedirDns) startHostLimitCleanup(ctx caddy.Context) {
 	go func() {
 		ticker := time.NewTicker(rd.hostLimitWindow)
 		defer ticker.Stop()
 		for {
 			select {
-			case now := <-ticker.C:
+			case <-ticker.C:
 				rd.hostLimit.mu.Lock()
-				rd.cleanupHostLimitState(now)
+				rd.hostLimit.trackers = make(map[string]*hostTracker, len(rd.hostLimit.trackers))
 				rd.hostLimit.mu.Unlock()
 			case <-ctx.Done():
 				return
@@ -60,12 +63,12 @@ func (rd *RedirDns) startHostLimitCleanup(ctx caddy.Context) {
 // Returns true (limit exceeded) when:
 //   - the client's IP address cannot be determined (fail-closed)
 //   - the client has already triggered DNS lookups for maxHostsPerClient distinct
-//     hostnames within hostLimitWindow
+//     hostnames within the current window
 //
-// A hostname the client has looked up before is always allowed through and its
-// timestamp is refreshed — only first-time lookups within the window consume a slot.
+// A hostname the client has looked up before is always allowed through — only
+// first-time lookups within the window consume a slot.
 // Returns false (no limit) when maxHostsPerClient or hostLimitWindow is not positive.
-func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now time.Time) bool {
+func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string) bool {
 	if rd.maxHostsPerClient <= 0 || rd.hostLimitWindow <= 0 {
 		return false
 	}
@@ -93,30 +96,18 @@ func (rd *RedirDns) exceedsPerClientHostLimit(r *http.Request, host string, now 
 			rd.evictOneHostTracker()
 		}
 		tracker = &hostTracker{
-			hosts: make(map[string]time.Time),
+			hosts: make(map[string]struct{}),
 		}
 		rd.hostLimit.trackers[clientID] = tracker
 	}
 
-	// sweep expired host entries for this client on the request path; the background
-	// goroutine handles full cleanup periodically, but this keeps per-client state
-	// accurate without waiting for the next tick
-	for h, seenAt := range tracker.hosts {
-		if now.Sub(seenAt) > rd.hostLimitWindow {
-			delete(tracker.hosts, h)
-		}
-	}
-	tracker.lastSeen = now
-
 	if _, exists := tracker.hosts[host]; exists {
-		// client has visited this host before within the window — refresh and allow
-		tracker.hosts[host] = now
 		return false
 	}
 	if len(tracker.hosts) >= rd.maxHostsPerClient {
 		return true
 	}
-	tracker.hosts[host] = now
+	tracker.hosts[host] = struct{}{}
 
 	return false
 }
@@ -130,21 +121,6 @@ func (rd *RedirDns) evictOneHostTracker() {
 	for id := range rd.hostLimit.trackers {
 		delete(rd.hostLimit.trackers, id)
 		return
-	}
-}
-
-// cleanupHostLimitState purges expired host entries and idle trackers.
-// Must be called with hostLimitMu held.
-func (rd *RedirDns) cleanupHostLimitState(now time.Time) {
-	for clientID, tracker := range rd.hostLimit.trackers {
-		for host, seenAt := range tracker.hosts {
-			if now.Sub(seenAt) > rd.hostLimitWindow {
-				delete(tracker.hosts, host)
-			}
-		}
-		if len(tracker.hosts) == 0 && now.Sub(tracker.lastSeen) > rd.hostLimitWindow {
-			delete(rd.hostLimit.trackers, clientID)
-		}
 	}
 }
 

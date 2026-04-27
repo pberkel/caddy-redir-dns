@@ -401,6 +401,12 @@ func TestServeHTTPHostCardinalityRateLimitResetsAfterWindow(t *testing.T) {
 	}
 
 	time.Sleep(40 * time.Millisecond)
+
+	// Simulate the window reset that startHostLimitCleanup would perform via its ticker.
+	rd.hostLimit.mu.Lock()
+	rd.hostLimit.trackers = make(map[string]*hostTracker, len(rd.hostLimit.trackers))
+	rd.hostLimit.mu.Unlock()
+
 	rr3 := httptest.NewRecorder()
 	if err := rd.ServeHTTP(rr3, makeReq("three.example.com"), nil); err != nil {
 		t.Fatalf("ServeHTTP #3 returned error: %v", err)

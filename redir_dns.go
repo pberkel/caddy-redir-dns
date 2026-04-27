@@ -266,7 +266,7 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 	debug.host = reqHost
 
 	// check if client has exceeded the per-client distinct-hostname DNS lookup limit
-	if rd.rateLimitEnabled && rd.exceedsPerClientHostLimit(r, reqHost, time.Now()) {
+	if rd.rateLimitEnabled && rd.exceedsPerClientHostLimit(r, reqHost) {
 		if c := rd.logger.Check(zapcore.DebugLevel, "DNS lookup skipped: client exceeded per-client host limit"); c != nil {
 			c.Write(
 				zap.String("host", reqHost),
