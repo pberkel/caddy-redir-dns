@@ -88,6 +88,96 @@ func TestIsValidAbsoluteURLRejectsCredentials(t *testing.T) {
 	}
 }
 
+func TestDomainAndSubdomainPlaceholders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		host     string
+		record   string
+		wantLoc  string
+		wantCode int
+	}{
+		{
+			name:     "domain and subdomain for three-label host",
+			host:     "www.example.com",
+			record:   "https://{domain}/{subdomain}",
+			wantLoc:  "https://example.com/www",
+			wantCode: 302,
+		},
+		{
+			name:     "domain only for apex host",
+			host:     "example.com",
+			record:   "https://other.com/{domain}",
+			wantLoc:  "https://other.com/example.com",
+			wantCode: 302,
+		},
+		{
+			name:     "subdomain empty for apex host",
+			host:     "example.com",
+			record:   "https://other.com/{subdomain}",
+			wantLoc:  "https://other.com/",
+			wantCode: 302,
+		},
+		{
+			name:     "multi-label subdomain",
+			host:     "a.b.example.com",
+			record:   "https://{domain}/{subdomain}",
+			wantLoc:  "https://example.com/a.b",
+			wantCode: 302,
+		},
+		{
+			name:     "public suffix co.uk",
+			host:     "sub.example.co.uk",
+			record:   "https://{domain}/{subdomain}",
+			wantLoc:  "https://example.co.uk/sub",
+			wantCode: 302,
+		},
+		{
+			name:     "subdomain. with trailing dot for non-apex",
+			host:     "www.example.com",
+			record:   "https://{subdomain.}{domain}",
+			wantLoc:  "https://www.example.com",
+			wantCode: 302,
+		},
+		{
+			name:     "subdomain. empty for apex host",
+			host:     "example.com",
+			record:   "https://{subdomain.}{domain}",
+			wantLoc:  "https://example.com",
+			wantCode: 302,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rd := newTestRedirDns(t)
+			rd.lookupFunc = func(_ context.Context, _ string) ([]string, time.Duration, error) {
+				return []string{tt.record}, 0, nil
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "http://"+tt.host+"/", nil)
+			req.Host = tt.host
+			repl := caddy.NewReplacer()
+			req = req.WithContext(context.WithValue(req.Context(), caddy.ReplacerCtxKey, repl))
+			rr := httptest.NewRecorder()
+
+			if err := rd.ServeHTTP(rr, req, nil); err != nil {
+				t.Fatalf("ServeHTTP returned error: %v", err)
+			}
+			if rr.Code != tt.wantCode {
+				t.Fatalf("status code = %d, want %d", rr.Code, tt.wantCode)
+			}
+			if got := rr.Header().Get("Location"); got != tt.wantLoc {
+				t.Fatalf("Location = %q, want %q", got, tt.wantLoc)
+			}
+		})
+	}
+}
+
 func TestNormalizeRequestHost(t *testing.T) {
 	t.Parallel()
 

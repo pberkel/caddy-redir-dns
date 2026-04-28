@@ -17,7 +17,7 @@ const (
 	defaultHostLimitWindow = time.Minute
 
 	// Default maximum unique hosts per client in a window
-	defaultMaxHostsPerClient = 100
+	defaultMaxHostsPerClient = 50
 
 	// Default maximum number of tracked per-IP rate-limit entries
 	defaultMaxTrackedClients = 100_000

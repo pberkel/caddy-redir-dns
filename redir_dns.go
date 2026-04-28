@@ -19,6 +19,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/net/publicsuffix"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -121,7 +122,7 @@ type RedirDns struct {
 	// first-time DNS lookups for within the sliding window. Takes two positional
 	// arguments: <limit> <duration> (e.g. "50 30s"). Repeat lookups for a hostname
 	// already seen within the window are always free. Exceeding the limit returns
-	// HTTP 429. Default: 100 1m.
+	// HTTP 429. Default: 50 1m.
 	// Both values accept Caddy global placeholders (e.g. "{env.PER_IP_LIMIT}").
 	PerClientRateLimit *PerClientRateLimit `json:"per_client_rate_limit,omitempty"`
 	// Maximum number of per-IP trackers held in memory. An arbitrary entry is evicted
@@ -540,6 +541,28 @@ func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Reques
 				"http.request.uri.query_escaped",
 				"http.request.uri.prefixed_query":
 				return val, nil
+			case "domain":
+				// {domain} expands to the registrable domain (eTLD+1) of the request host.
+				// e.g. "www.example.com" → "example.com", "sub.example.co.uk" → "example.co.uk"
+				domain, err := publicsuffix.EffectiveTLDPlusOne(reqHost)
+				if err != nil {
+					return "", nil
+				}
+				return domain, nil
+			case "subdomain", "subdomain.":
+				// {subdomain} expands to everything to the left of the registrable domain.
+				// e.g. "www.example.com" → "www", "a.b.example.com" → "a.b", "example.com" → ""
+				// {subdomain.} appends a trailing dot when non-empty, useful for building host
+				// strings: {subdomain.}{domain} → "www.example.com" or "example.com" for apex hosts.
+				domain, err := publicsuffix.EffectiveTLDPlusOne(reqHost)
+				if err != nil || len(domain) >= len(reqHost) {
+					return "", nil
+				}
+				sub := reqHost[:len(reqHost)-len(domain)-1]
+				if key == "subdomain." {
+					sub += "."
+				}
+				return sub, nil
 			default:
 				return "", nil
 			}

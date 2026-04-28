@@ -1,8 +1,15 @@
 # Changelog
 
-## Unreleased
+## v1.8.0 — 2026-04-28
+
+### Added
+- Three new placeholders for public-suffix-aware host decomposition, computed via `golang.org/x/net/publicsuffix`:
+  - `{domain}` — registrable domain (eTLD+1) of the request host. e.g. `www.example.com` → `example.com`, `sub.example.co.uk` → `example.co.uk`.
+  - `{subdomain}` — everything to the left of the registrable domain. e.g. `www.example.com` → `www`, `a.b.example.com` → `a.b`, `example.com` → `""` (empty for apex hosts).
+  - `{subdomain.}` — `{subdomain}` with a trailing dot appended when non-empty, or `""` for apex hosts. Useful for constructing host strings that work for both apex and non-apex hosts: `{subdomain.}{domain}` expands to `www.example.com` or `example.com` without a double-dot or leading dot.
 
 ### Changed
+- `per_client_rate_limit` default limit reduced from `100` to `50` per minute.
 - `per_client_rate_limit` window is now a fixed window rather than a sliding one. Previously the background cleanup goroutine iterated all tracked clients and their host entries under the mutex (O(clients × hosts)), and the request path ran an additional per-entry expiry sweep on every call. Both are replaced by a single map reset at each window boundary: all per-client state is discarded atomically, dropping lock hold time from O(n×m) to O(1) and eliminating the per-request sweep entirely. Tradeoff: a client can observe up to 2× `max_hosts_per_client` distinct hosts across a window boundary. For an abuse-prevention limiter this is acceptable.
 
 ---

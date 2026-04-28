@@ -41,7 +41,7 @@ Several optional parameters are also supported:
 		max_cache_size          10_000
 		# Rate limit parameters
 		rate_limit              true
-		per_client_rate_limit   100 1m
+		per_client_rate_limit   50 1m
 		max_tracked_clients     100_000
 		ipv6_prefix_length      64
 		rate_limit_bypass       192.168.0.0/16 192.168.2.1/32
@@ -97,7 +97,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 | Parameter | Default | Description |
 |---|---|---|
 | `rate_limit` | `false` | Enable per-client DNS lookup rate limiting. When `false` (default) all requests pass through regardless of how many distinct hostnames they trigger. Set to `true` on public deployments to guard against DNS amplification from a single client. The remaining rate-limit parameters only take effect when `rate_limit true` is set. |
-| `per_client_rate_limit` | `100 1m` | Per-client rate limit: `<limit> <duration>`. Maximum distinct hostnames a single IP may trigger first-time DNS lookups for within a fixed window. Repeat lookups for a hostname already seen in the window are always free. All per-client state is reset atomically at each window boundary. Exceeding the limit returns `429`. Both values accept Caddy global placeholders. |
+| `per_client_rate_limit` | `50 1m` | Per-client rate limit: `<limit> <duration>`. Maximum distinct hostnames a single IP may trigger first-time DNS lookups for within a fixed window. Repeat lookups for a hostname already seen in the window are always free. All per-client state is reset atomically at each window boundary. Exceeding the limit returns `429`. Both values accept Caddy global placeholders. |
 | `max_tracked_clients` | `100_000` | Maximum number of per-IP tracking entries held in memory. An arbitrary entry is evicted when full, preventing unbounded memory growth under rotating-IP traffic. |
 | `ipv6_prefix_length` | `64` | IPv6 prefix length used to group client addresses for rate limiting. Clients within the same prefix are counted as a single entity, preventing prefix-rotation attacks where an attacker cycles through a large IPv6 block to evade per-IP limits. Has no effect on IPv4 addresses. Accepts values between `1` and `128`; use `128` to track each IPv6 address individually. |
 | `rate_limit_bypass` | — | CIDRs or IPs exempt from the per-client DNS lookup rate limit. Each value may be a bare IP address or a CIDR prefix (e.g. `10.0.0.0/8`). The resolved client IP is matched against this list. Useful for load testing, internal health checks, or other known trusted clients. |
@@ -188,6 +188,9 @@ This module supports a subset of Caddy HTTP [placeholders](https://caddyserver.c
 | {scheme} | {http.request.scheme} |
 | {host} | {http.request.host} |
 | {labels.*} | {http.request.host.labels.*} |
+| {domain} | registrable domain (eTLD+1) of the request host, e.g. `example.com` from `www.example.com` |
+| {subdomain} | everything to the left of `{domain}`, e.g. `www` from `www.example.com`; empty string for apex hosts |
+| {subdomain.} | `{subdomain}` with a trailing dot appended, or empty string for apex hosts — useful for building host strings: `{subdomain.}{domain}` → `www.example.com` or `example.com` |
 | {hostport} | {http.request.hostport} |
 | {port} | {http.request.port} |
 | {uri} | {http.request.uri} |
@@ -211,6 +214,8 @@ Several examples demonstrate how placeholder values will be substituted:
 | http://www.old-domain.com/blog/?id=100 | https://www.new-domain.com{path}{?query} | https://www.new-domain.com/blog/?id=100 |
 | http://web.old-domain.com/blog/?id=100 | {scheme}://{labels.2}.new-domain.com{uri} | http://web.new-domain.com/blog/?id=100 |
 | https://web.old-domain.com/blog/?id=100 | https://www.new-domain.com?host={host}&uri={%uri}| https://www.new-domain.com?host=web.old-domain.com&uri=%2Fblog%2F%3Fid%3D100 |
+| http://www.old-domain.com/page | https://{subdomain.}new-domain.com{path} | https://www.new-domain.com/page |
+| http://old-domain.com/page | https://{subdomain.}new-domain.com{path} | https://new-domain.com/page |
 
 ### Acknowledgements
 
