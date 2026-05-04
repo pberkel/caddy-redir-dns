@@ -146,6 +146,7 @@ When `debug_headers` is active the following response headers are added:
 | `X-Redir-Dns-Host` | valid hostname found | normalised request hostname |
 | `X-Redir-Dns-Query` | lookup attempted | TXT query name (e.g. `_redirdns.www.example.com`) |
 | `X-Redir-Dns-Record` | records returned | raw TXT record value; one header per record |
+| `X-Redir-Dns-Record-Decrypted` | record was encrypted and decryption succeeded | decrypted plaintext value; one header per encrypted record |
 | `X-Redir-Dns-Cache` | lookup attempted | `HIT` or `MISS` |
 | `X-Redir-Dns-Cache-Ttl` | cache entry exists | remaining TTL (e.g. `28.5s`) |
 | `X-Redir-Dns-Reason` | always | `redirect`, `invalid_host`, `rate_limited`, `dns_lookup_failed`, or `no_valid_txt_record` |

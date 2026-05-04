@@ -354,6 +354,19 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				"the lookup_timeout setting is sufficient.", txtQuery))
 	}
 
+	// pre-allocate decryptedRecords parallel to records so writeHeaders can emit
+	// X-Redir-Dns-Record-Decrypted alongside X-Redir-Dns-Record when encryption is active.
+	if debug.active && rd.encryptionKey != nil {
+		debug.decryptedRecords = make([]string, len(txtRecord))
+		for i, txt := range txtRecord {
+			if !strings.HasPrefix(txt, "http://") && !strings.HasPrefix(txt, "https://") {
+				if plain, err := decryptTxtRecord(rd.encryptionKey, txt); err == nil {
+					debug.decryptedRecords[i] = plain
+				}
+			}
+		}
+	}
+
 	// iterate over each TXT record in the response
 	for i, txt := range txtRecord {
 		// parse the TXT record to extract redirect location
@@ -765,16 +778,17 @@ func isSupportedStatusCode(code int) bool {
 // headers when the request carries an X-Debug-Key header matching the configured key.
 // The zero value is safe to use (active=false means no headers are emitted).
 type requestDebug struct {
-	active      bool
-	written     bool          // guards against writing headers more than once per response
-	host        string        // normalised request hostname
-	query       string        // DNS TXT query name (e.g. "_redirdns.www.example.com")
-	records     []string      // raw TXT record values returned by the lookup
-	cached      bool          // true when the lookup was served from the outer cache
-	hasCached   bool          // true once cached has been set
-	cacheTTL    time.Duration // remaining time until the cache entry expires
-	hasCacheTTL bool          // true once cacheTTL has been set
-	reason      string        // outcome: "redirect", "invalid_host", "rate_limited", etc.
+	active           bool
+	written          bool          // guards against writing headers more than once per response
+	host             string        // normalised request hostname
+	query            string        // DNS TXT query name (e.g. "_redirdns.www.example.com")
+	records          []string      // raw TXT record values returned by the lookup
+	decryptedRecords []string      // decrypted plaintext for records that were encrypted; parallel to records, empty string = not encrypted
+	cached           bool          // true when the lookup was served from the outer cache
+	hasCached        bool          // true once cached has been set
+	cacheTTL         time.Duration // remaining time until the cache entry expires
+	hasCacheTTL      bool          // true once cacheTTL has been set
+	reason           string        // outcome: "redirect", "invalid_host", "rate_limited", etc.
 }
 
 // newRequestDebug returns an active requestDebug when debug_headers is configured and
@@ -808,8 +822,11 @@ func (d *requestDebug) writeHeaders(w http.ResponseWriter) {
 	if d.query != "" {
 		h.Set("X-Redir-Dns-Query", d.query)
 	}
-	for _, rec := range d.records {
+	for i, rec := range d.records {
 		h.Add("X-Redir-Dns-Record", rec)
+		if i < len(d.decryptedRecords) && d.decryptedRecords[i] != "" {
+			h.Add("X-Redir-Dns-Record-Decrypted", d.decryptedRecords[i])
+		}
 	}
 	if d.hasCached {
 		if d.cached {
