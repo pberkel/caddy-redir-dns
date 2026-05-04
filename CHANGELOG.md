@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.9.0 — 2026-05-04
+
+### Added
+- `encryption_key` configuration parameter on the `redir_dns` handler enables AES-256-GCM decryption of encrypted TXT record values. When set, TXT records that do not begin with `http://` or `https://` are treated as base64url-encoded ciphertext and decrypted before processing. Because base64 never contains a colon, the URL scheme prefix serves as a reliable natural discriminator between plaintext and ciphertext — no explicit prefix or flag is needed in the TXT record. Accepts a Caddy global placeholder (e.g. `{env.REDIR_DNS_ENCRYPTION_KEY}`).
+- New `redir_dns_encrypt` HTTP handler module (Caddyfile directive: `redir_dns_encrypt`). Exposes a server-side encryption API: clients `POST {"plaintext": "..."}` to the configured endpoint and receive `{"ciphertext": "..."}` in response. The encryption key is stored on the server and never exposed to clients, making it safe to offer a public-facing encryption UI without distributing the key. Must be paired with the same `encryption_key` as the `redir_dns` handler.
+- `examples/encrypt.html` — standalone browser-based demo page that performs AES-256-GCM encryption client-side using the WebCrypto API. Intended as a documentation example for operators self-hosting the module. Requires the operator to supply their own key in the browser; no server-side component is needed.
+
+### Changed
+- `encryption_key` key parsing now accepts both base64-encoded values and plain byte strings. If the supplied value is valid base64 and decodes to exactly 32 bytes, those decoded bytes are used as the key. Otherwise the raw bytes of the string are used directly, allowing a plain 32-character ASCII key without encoding. Keys longer than 32 bytes are truncated to 32 with a startup warning; keys shorter than 32 bytes are rejected with an error.
+- `RedirDns` and `EncryptHandler` now implement `String() string` with a value receiver, redacting `EncryptionKey` (and `DebugHeaders` on `RedirDns`) before marshalling to JSON. This prevents sensitive values from leaking into Caddy's structured log output when the structs are formatted via `fmt`.
+
+---
+
 ## v1.8.0 — 2026-04-28
 
 ### Added

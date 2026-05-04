@@ -165,12 +165,28 @@ type RedirDns struct {
 	// DNS lookup outcome. The key is compared using a constant-time comparison to avoid
 	// timing-based key enumeration. Accepts a Caddy global placeholder (e.g. "{env.DEBUG_KEY}").
 	DebugHeaders string `json:"debug_headers,omitempty"`
+	// 32-byte AES-256 key used to decrypt encrypted TXT record values.
+	// When set, TXT records that do not begin with "http://" or "https://" are treated
+	// as base64-encoded ciphertext (RawURLEncoding) and decrypted before processing.
+	// Because base64 never contains a colon, the URL scheme prefix is a reliable natural
+	// discriminator between plaintext and ciphertext — no explicit prefix is required in
+	// the TXT record.
+	//
+	// The encryption format is AES-256-GCM:
+	//   [12B nonce][ciphertext || 16B GCM auth tag]
+	//
+	// The key may be specified as:
+	//   - A base64-encoded 32-byte value (recommended): openssl rand -base64 32
+	//   - A plain 32-character ASCII string (e.g. a memorable passphrase)
+	// Accepts a Caddy global placeholder (e.g. "{env.ENCRYPTION_KEY}").
+	EncryptionKey string `json:"encryption_key,omitempty"`
 
 	// response rendering
-	responseTpl *template.Template
-	logger      *zap.Logger
-	debugKey    []byte     // compiled from DebugHeaders at provision time; nil when disabled
-	metrics     *rdMetrics // nil when Metrics is false
+	responseTpl   *template.Template
+	logger        *zap.Logger
+	debugKey      []byte     // compiled from DebugHeaders at provision time; nil when disabled
+	metrics       *rdMetrics // nil when Metrics is false
+	encryptionKey []byte     // 32-byte AES-256 key; nil when EncryptionKey is not configured
 
 	// redirect
 	statusCode          int               // explicit numeric code; only used when !statusCodeAuto && !statusCodeHTML
@@ -338,6 +354,19 @@ func (rd *RedirDns) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddy
 				"the lookup_timeout setting is sufficient.", txtQuery))
 	}
 
+	// pre-allocate decryptedRecords parallel to records so writeHeaders can emit
+	// X-Redir-Dns-Record-Decrypted alongside X-Redir-Dns-Record when encryption is active.
+	if debug.active && rd.encryptionKey != nil {
+		debug.decryptedRecords = make([]string, len(txtRecord))
+		for i, txt := range txtRecord {
+			if !strings.HasPrefix(txt, "http://") && !strings.HasPrefix(txt, "https://") {
+				if plain, err := decryptTxtRecord(rd.encryptionKey, txt); err == nil {
+					debug.decryptedRecords[i] = plain
+				}
+			}
+		}
+	}
+
 	// iterate over each TXT record in the response
 	for i, txt := range txtRecord {
 		// parse the TXT record to extract redirect location
@@ -492,8 +521,26 @@ func autoStatusCode(permanent bool, method string) int {
 //     values. Only an explicit allowlist of request-derived placeholders is accepted;
 //     all others are replaced with an empty string to prevent accidental data leakage.
 //
+// When an encryption key is configured, records that do not start with "http://" or
+// "https://" are decrypted before placeholder expansion. Base64 never contains a colon,
+// so the URL scheme prefix is a reliable natural discriminator.
+//
 // Returns an empty target string if the TXT record does not contain a valid redirect.
 func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Request) (string, int) {
+	// decrypt the record if an encryption key is configured and the value does not look
+	// like a plaintext URL. Base64 (any variant) never contains a ':', so the http:// /
+	// https:// scheme prefix reliably identifies unencrypted records.
+	if rd.encryptionKey != nil && !strings.HasPrefix(record, "http://") && !strings.HasPrefix(record, "https://") {
+		decrypted, err := decryptTxtRecord(rd.encryptionKey, record)
+		if err != nil {
+			if c := rd.logger.Check(zapcore.DebugLevel, "Rejected DNS TXT redirect candidate because decryption failed"); c != nil {
+				c.Write(zap.Error(err))
+			}
+			return "", rd.resolveStatusCode(r.Method)
+		}
+		record = decrypted
+	}
+
 	// first pass: rewrite shorthand tokens to full Caddy placeholder names
 	replaced := rd.replacer.Replace(record)
 
@@ -731,16 +778,17 @@ func isSupportedStatusCode(code int) bool {
 // headers when the request carries an X-Debug-Key header matching the configured key.
 // The zero value is safe to use (active=false means no headers are emitted).
 type requestDebug struct {
-	active      bool
-	written     bool          // guards against writing headers more than once per response
-	host        string        // normalised request hostname
-	query       string        // DNS TXT query name (e.g. "_redirdns.www.example.com")
-	records     []string      // raw TXT record values returned by the lookup
-	cached      bool          // true when the lookup was served from the outer cache
-	hasCached   bool          // true once cached has been set
-	cacheTTL    time.Duration // remaining time until the cache entry expires
-	hasCacheTTL bool          // true once cacheTTL has been set
-	reason      string        // outcome: "redirect", "invalid_host", "rate_limited", etc.
+	active           bool
+	written          bool          // guards against writing headers more than once per response
+	host             string        // normalised request hostname
+	query            string        // DNS TXT query name (e.g. "_redirdns.www.example.com")
+	records          []string      // raw TXT record values returned by the lookup
+	decryptedRecords []string      // decrypted plaintext for records that were encrypted; parallel to records, empty string = not encrypted
+	cached           bool          // true when the lookup was served from the outer cache
+	hasCached        bool          // true once cached has been set
+	cacheTTL         time.Duration // remaining time until the cache entry expires
+	hasCacheTTL      bool          // true once cacheTTL has been set
+	reason           string        // outcome: "redirect", "invalid_host", "rate_limited", etc.
 }
 
 // newRequestDebug returns an active requestDebug when debug_headers is configured and
@@ -774,8 +822,11 @@ func (d *requestDebug) writeHeaders(w http.ResponseWriter) {
 	if d.query != "" {
 		h.Set("X-Redir-Dns-Query", d.query)
 	}
-	for _, rec := range d.records {
+	for i, rec := range d.records {
 		h.Add("X-Redir-Dns-Record", rec)
+		if i < len(d.decryptedRecords) && d.decryptedRecords[i] != "" {
+			h.Add("X-Redir-Dns-Record-Decrypted", d.decryptedRecords[i])
+		}
 	}
 	if d.hasCached {
 		if d.cached {

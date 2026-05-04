@@ -174,6 +174,19 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 	if rd.DebugHeaders != "" {
 		rd.debugKey = []byte(rd.DebugHeaders)
 	}
+	rd.EncryptionKey = repl.ReplaceAll(rd.EncryptionKey, "")
+	if rd.EncryptionKey != "" {
+		if rd.encryptionKey, err = parseEncryptionKey(rd.EncryptionKey); err != nil {
+			return fmt.Errorf("encryption_key: %w", err)
+		}
+		if len(rd.encryptionKey) < encKeySize {
+			return fmt.Errorf("encryption_key: key must be at least %d bytes (AES-256), got %d", encKeySize, len(rd.encryptionKey))
+		}
+		if len(rd.encryptionKey) > encKeySize {
+			rd.logger.Warn("encryption_key is longer than 32 bytes; truncating to 32", zap.Int("original_len", len(rd.encryptionKey)))
+			rd.encryptionKey = rd.encryptionKey[:encKeySize]
+		}
+	}
 
 	// validate fields whose constraints cannot be expressed as parse errors
 	if rd.DefaultTarget != "" && (!isValidAbsoluteURL(rd.DefaultTarget) || containsNonPrintableASCII(rd.DefaultTarget)) {
@@ -338,6 +351,7 @@ func (rd *RedirDns) Provision(ctx caddy.Context) error {
 			zap.Bool("metrics", rd.metrics != nil),
 			zap.Bool("debug_headers", len(rd.debugKey) > 0),
 			zap.Bool("http_cache_control", rd.HTTPCacheControl),
+			zap.Bool("encryption", rd.encryptionKey != nil),
 		)
 	}
 
@@ -475,6 +489,11 @@ func (rd *RedirDns) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				rd.DebugHeaders = d.Val()
 			case "http_cache_control":
 				rd.HTTPCacheControl = true
+			case "encryption_key":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				rd.EncryptionKey = d.Val()
 			default:
 				return d.Errf("unrecognized configuration option %q", d.Val())
 			}
@@ -489,6 +508,21 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	var rd = New()
 	err := rd.UnmarshalCaddyfile(h.Dispenser)
 	return rd, err
+}
+
+// String returns a JSON representation of the configuration with sensitive
+// fields redacted. The value receiver is intentional: EncryptionKey and
+// DebugHeaders are mutated on the copy so the original struct is never modified.
+func (rd RedirDns) String() string {
+	const redacted = "REDACTED"
+	if rd.EncryptionKey != "" {
+		rd.EncryptionKey = redacted
+	}
+	if rd.DebugHeaders != "" {
+		rd.DebugHeaders = redacted
+	}
+	b, _ := json.Marshal(rd)
+	return string(b)
 }
 
 // Interface guards

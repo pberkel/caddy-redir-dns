@@ -50,6 +50,8 @@ Several optional parameters are also supported:
 		http_cache_control
 		metrics
 		debug_headers           my-secret-key
+		# Encryption
+		encryption_key          {env.REDIR_DNS_ENCRYPTION_KEY}
 	}
 }
 ```
@@ -135,6 +137,7 @@ All parameters accept [Caddy global placeholders](https://caddyserver.com/docs/c
 | `metrics` | `false` | Expose Prometheus metrics. When enabled, the following metrics are emitted under the `caddy_redir_dns_` namespace: `redirects_total{code}` (redirect responses by HTTP status code), `errors_total{reason}` (error responses by reason: `invalid_host`, `rate_limited`, `dns_lookup_failed`, `no_valid_txt_record`), `cache_lookups_total{status}` (cache outcomes: `hit`, `miss`, `stale`), `request_duration_seconds` (handler latency histogram). Requires Caddy to be built with metrics support (enabled by default). Metrics are scraped from the standard Caddy `/metrics` endpoint. |
 | `http_cache_control` | `false` | Add `Cache-Control: max-age=N` and `Age: N` headers to successful redirect responses. `max-age` is the full TTL of the DNS cache entry; `Age` is the number of seconds elapsed since the entry was cached. Not added to error responses (404, 429). |
 | `debug_headers` | — | Secret key for opt-in diagnostic response headers. Requests carrying `X-Debug-Key: <key>` with a matching value receive the headers below. Key is constant-time compared. |
+| `encryption_key` | — | AES-256-GCM key used to decrypt encrypted TXT record values. When set, TXT records that do not begin with `http://` or `https://` are treated as base64url-encoded ciphertext and decrypted before processing. See [Encrypted TXT Records](#encrypted-txt-records). |
 
 When `debug_headers` is active the following response headers are added:
 
@@ -143,6 +146,7 @@ When `debug_headers` is active the following response headers are added:
 | `X-Redir-Dns-Host` | valid hostname found | normalised request hostname |
 | `X-Redir-Dns-Query` | lookup attempted | TXT query name (e.g. `_redirdns.www.example.com`) |
 | `X-Redir-Dns-Record` | records returned | raw TXT record value; one header per record |
+| `X-Redir-Dns-Record-Decrypted` | record was encrypted and decryption succeeded | decrypted plaintext value; one header per encrypted record |
 | `X-Redir-Dns-Cache` | lookup attempted | `HIT` or `MISS` |
 | `X-Redir-Dns-Cache-Ttl` | cache entry exists | remaining TTL (e.g. `28.5s`) |
 | `X-Redir-Dns-Reason` | always | `redirect`, `invalid_host`, `rate_limited`, `dns_lookup_failed`, or `no_valid_txt_record` |
@@ -216,6 +220,146 @@ Several examples demonstrate how placeholder values will be substituted:
 | https://web.old-domain.com/blog/?id=100 | https://www.new-domain.com?host={host}&uri={%uri}| https://www.new-domain.com?host=web.old-domain.com&uri=%2Fblog%2F%3Fid%3D100 |
 | http://www.old-domain.com/page | https://{subdomain.}new-domain.com{path} | https://www.new-domain.com/page |
 | http://old-domain.com/page | https://{subdomain.}new-domain.com{path} | https://new-domain.com/page |
+
+### Encrypted TXT Records
+
+By default, a `_redirect` TXT record value is publicly visible to anyone who queries DNS. With encryption, the TXT record stores opaque ciphertext — only the redirect service can decrypt it using its secret key. DNS observers and query logs see only random-looking base64 data.
+
+#### Encryption scheme
+
+Records are encrypted with **AES-256-GCM**. The binary format after base64url decoding is:
+
+```
+[12B random nonce][ciphertext || 16B AES-GCM auth tag]
+```
+
+The authentication tag ensures tampered ciphertext is detected and rejected. Each encryption call generates a fresh nonce, so two encryptions of the same plaintext produce different ciphertext values — both are valid.
+
+**Discriminator:** base64 never contains a colon, so the redirect service uses the presence of `http://` or `https://` at the start of a TXT record value as a natural discriminator between plaintext and ciphertext. No explicit prefix or flag is needed in the TXT record.
+
+#### Configuring the key
+
+Generate a key with:
+
+```bash
+openssl rand -base64 32
+```
+
+The key may be supplied as:
+- A **base64-encoded 32-byte value** (recommended — full 256-bit entropy): the output of `openssl rand -base64 32`
+- A **plain 32-character ASCII string** (e.g. a memorable passphrase) — lower entropy but accepted
+
+Keys longer than 32 bytes are truncated with a warning at startup. Keys shorter than 32 bytes are rejected.
+
+Configure the key on the `redir_dns` handler:
+
+```caddyfile
+:80 {
+    redir_dns {
+        encryption_key {env.REDIR_DNS_ENCRYPTION_KEY}
+    }
+}
+```
+
+#### Encrypted TXT record format
+
+Use the encrypted value exactly as you would a plaintext URL:
+
+```
+# Plaintext (destination visible in DNS)
+_redirect.www.example.com.  IN  TXT  "https://destination.com"
+
+# Encrypted (destination private)
+_redirect.www.example.com.  IN  TXT  "3q2-7wEAAAAAAAAAAAAA..."
+```
+
+The status code (if any) is embedded inside the encrypted payload. Do not append anything outside the ciphertext.
+
+#### Generating encrypted values
+
+Use the companion `redir_dns_encrypt` handler (see below) to generate encrypted TXT record values via an HTTP API — the key never leaves the server.
+
+Alternatively, for offline or scripted use, encrypt with `openssl`:
+
+```bash
+# Set these variables
+KEY_B64="<your base64 key>"
+PLAINTEXT="https://destination.com"
+
+# Encrypt
+KEY_HEX=$(echo "$KEY_B64" | base64 -d | xxd -p -c 256)
+NONCE_HEX=$(openssl rand -hex 12)
+CIPHER_HEX=$(echo -n "$PLAINTEXT" | openssl enc -aes-256-gcm \
+    -K "$KEY_HEX" -iv "$NONCE_HEX" -nosalt 2>/dev/null | xxd -p -c 256)
+
+# Assemble and base64url-encode [nonce || ciphertext+tag]
+echo "${NONCE_HEX}${CIPHER_HEX}" | xxd -r -p | base64 | \
+    tr '+/' '-_' | tr -d '='
+```
+
+For a browser-based demo that performs encryption client-side using the WebCrypto API, see [`examples/encrypt.html`](examples/encrypt.html).
+
+---
+
+### `redir_dns_encrypt` handler
+
+`redir_dns_encrypt` is a companion Caddy HTTP handler module that exposes an API endpoint for generating encrypted TXT record values. The encryption key is stored on the server — clients POST a plaintext redirect target and receive back the ciphertext, without ever seeing the key.
+
+This is useful when you want to offer an encryption UI (e.g. a web page) where users can generate encrypted TXT records for use with a hosted redirect service that has `encryption_key` configured.
+
+#### Configuration
+
+```caddyfile
+handle /api/encrypt {
+    redir_dns_encrypt {
+        encryption_key {env.REDIR_DNS_ENCRYPTION_KEY}
+    }
+}
+```
+
+The `encryption_key` must match the key configured on the `redir_dns` handler. The same key format rules apply.
+
+#### API
+
+**Request**
+
+```
+POST /api/encrypt
+Content-Type: application/json
+
+{"plaintext": "https://destination.com"}
+{"plaintext": "https://destination.com permanent"}
+```
+
+**Response**
+
+```json
+{"ciphertext": "3q2-7wEAAAAAAAAAAAAA..."}
+```
+
+Place the `ciphertext` value directly in your `_redirect` TXT record.
+
+**Example with curl:**
+
+```bash
+curl -s -X POST https://your-caddy-host/api/encrypt \
+    -H 'Content-Type: application/json' \
+    -d '{"plaintext": "https://destination.com"}' \
+| jq -r .ciphertext
+```
+
+**Error responses** use HTTP `400` (bad request) or `405` (method not allowed):
+
+```json
+{"error": "plaintext is required"}
+{"error": "invalid JSON body"}
+```
+
+#### Security considerations
+
+- Restrict access to `/api/encrypt` with `basic_auth` or network-level controls — it accepts arbitrary plaintext and returns ciphertext that the redirect service will honour.
+- The `encryption_key` value is never returned by the API or included in any response.
+- Both `redir_dns` and `redir_dns_encrypt` redact the `encryption_key` field from their JSON representation (used in logging), preventing the key from leaking into Caddy's structured log output.
 
 ### Acknowledgements
 
