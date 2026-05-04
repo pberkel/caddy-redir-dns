@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Encrypt TXT Record — caddy-redir-dns demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 1rem;
+      line-height: 1.6;
+      color: #1a1a1a;
+      background: #f5f5f5;
+      margin: 0;
+      padding: 2rem 1rem;
+    }
+
+    .container {
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+    .subtitle { color: #666; margin: 0 0 2rem; font-size: 0.9rem; }
+
+    .card {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 0.4rem;
+    }
+
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.875rem;
+      color: #1a1a1a;
+      background: #fafafa;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus { border-color: #0066cc; }
+
+    .hint {
+      font-size: 0.8rem;
+      color: #888;
+      margin: 0.4rem 0 0;
+    }
+    .hint code {
+      background: #f0f0f0;
+      padding: 0 0.3em;
+      border-radius: 3px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: #0066cc;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      padding: 0.5rem 1.1rem;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      margin-top: 0.75rem;
+    }
+    .btn:hover { opacity: 0.88; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .btn-copy {
+      background: transparent;
+      border: 1px solid #ccc;
+      color: #555;
+      margin-top: 0.6rem;
+    }
+    .btn-copy:hover { color: #1a1a1a; border-color: #999; opacity: 1; }
+
+    #result { display: none; margin-top: 1rem; }
+
+    .result-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 0.4rem;
+    }
+
+    .result-value {
+      background: #f0f9f0;
+      border: 1px solid #bde8bd;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.8rem;
+      color: #267326;
+      word-break: break-all;
+      margin: 0;
+    }
+
+    .copy-confirm {
+      font-size: 0.8rem;
+      color: #267326;
+      margin-left: 0.5rem;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .copy-confirm.show { opacity: 1; }
+
+    #error-box {
+      display: none;
+      background: #fff8f0;
+      border: 1px solid #f5c6a0;
+      border-left: 4px solid #e67e22;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-size: 0.875rem;
+      color: #7a3b0a;
+      margin-top: 1rem;
+    }
+
+    .note {
+      background: #f5f8ff;
+      border: 1px solid #c8d8f0;
+      border-left: 4px solid #0066cc;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+      color: #1a3a5c;
+      margin-top: 1rem;
+    }
+
+    .note code {
+      background: rgba(0,0,0,0.06);
+      padding: 0 0.3em;
+      border-radius: 3px;
+    }
+
+    footer {
+      margin-top: 2rem;
+      font-size: 0.8rem;
+      color: #999;
+      text-align: center;
+    }
+    footer a { color: #0066cc; }
+
+    .spinner {
+      display: inline-block;
+      width: 13px;
+      height: 13px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <h1>Encrypt TXT Record</h1>
+  <p class="subtitle">
+    Demo page for <a href="https://github.com/pberkel/caddy-redir-dns">caddy-redir-dns</a> —
+    encrypt a redirect target in your browser using AES-256-GCM (WebCrypto API).
+  </p>
+
+  <div class="card">
+    <label for="key-input">Encryption key (base64-encoded 32 bytes)</label>
+    <input id="key-input" type="password"
+           placeholder="base64-encoded 32-byte AES-256 key"
+           oninput="clearResult()" autocomplete="off" spellcheck="false">
+    <p class="hint">
+      Generate a key with: <code>openssl rand -base64 32</code> — use the same value in the
+      <code>encryption_key</code> directive in your Caddy config.
+    </p>
+  </div>
+
+  <div class="card">
+    <label for="plaintext">Redirect target</label>
+    <input id="plaintext" type="text"
+           placeholder="https://destination.com"
+           oninput="clearResult()"
+           onkeydown="if(event.key==='Enter')doEncrypt()">
+    <p class="hint">
+      Same format as a plaintext TXT record: <code>https://example.com</code> or
+      <code>https://example.com permanent</code>
+    </p>
+    <button id="encrypt-btn" class="btn" onclick="doEncrypt()">Encrypt</button>
+  </div>
+
+  <div id="error-box"></div>
+
+  <div id="result">
+    <div class="card">
+      <div class="result-label">Encrypted TXT record value</div>
+      <pre class="result-value" id="result-value"></pre>
+      <div>
+        <button class="btn btn-copy" onclick="copyResult()">Copy</button>
+        <span class="copy-confirm" id="copy-confirm">Copied!</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>How it works:</strong> A random 12-byte nonce is generated for every encryption.
+    The binary blob <code>[nonce || ciphertext || 16B tag]</code> is base64url-encoded for DNS storage.
+    Each click produces a different ciphertext — all decrypt to the same plaintext.
+    Encryption runs entirely in your browser; neither the key nor the plaintext is sent over the network.
+  </div>
+
+  <footer>
+    <a href="https://github.com/pberkel/caddy-redir-dns">caddy-redir-dns</a> &mdash;
+    example from <code>examples/encrypt.html</code>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  function base64ToBytes(s) {
+    const std = s.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = (4 - std.length % 4) % 4;
+    const binary = atob(std + '='.repeat(pad));
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+
+  function bytesToBase64RawUrl(bytes) {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  }
+
+  function parseKey(input) {
+    let bytes;
+    try {
+      bytes = base64ToBytes(input.trim());
+    } catch (e) {
+      throw new Error('Key is not valid base64. Generate one with: openssl rand -base64 32');
+    }
+    if (bytes.length !== 32) {
+      throw new Error('Key must decode to 32 bytes (AES-256), got ' + bytes.length + ' bytes.');
+    }
+    return bytes;
+  }
+
+  async function encryptPayload(keyBytes, plaintext) {
+    const aesKey = await crypto.subtle.importKey(
+      'raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']
+    );
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce },
+      aesKey,
+      new TextEncoder().encode(plaintext)
+    ));
+    // assemble: [12B nonce][ciphertext || 16B GCM tag]
+    const blob = new Uint8Array(12 + ciphertext.length);
+    blob.set(nonce, 0);
+    blob.set(ciphertext, 12);
+    return bytesToBase64RawUrl(blob);
+  }
+
+  window.clearResult = function () {
+    document.getElementById('result').style.display = 'none';
+    document.getElementById('error-box').style.display = 'none';
+  };
+
+  window.doEncrypt = async function () {
+    const keyInput = document.getElementById('key-input').value;
+    const plaintext = document.getElementById('plaintext').value.trim();
+    const errEl = document.getElementById('error-box');
+    const resultEl = document.getElementById('result');
+    const btn = document.getElementById('encrypt-btn');
+
+    errEl.style.display = 'none';
+    resultEl.style.display = 'none';
+
+    let keyBytes;
+    try {
+      keyBytes = parseKey(keyInput);
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.style.display = '';
+      document.getElementById('key-input').focus();
+      return;
+    }
+    if (!plaintext) {
+      document.getElementById('plaintext').focus();
+      return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>&nbsp;Encrypting&hellip;';
+
+    try {
+      const encrypted = await encryptPayload(keyBytes, plaintext);
+      document.getElementById('result-value').textContent = encrypted;
+      resultEl.style.display = '';
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.style.display = '';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Encrypt';
+    }
+  };
+
+  window.copyResult = function () {
+    const text = document.getElementById('result-value').textContent;
+    navigator.clipboard.writeText(text).then(function () {
+      const c = document.getElementById('copy-confirm');
+      c.classList.add('show');
+      setTimeout(function () { c.classList.remove('show'); }, 1800);
+    });
+  };
+
+}());
+</script>
+</body>
+</html>

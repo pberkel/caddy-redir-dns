@@ -165,12 +165,28 @@ type RedirDns struct {
 	// DNS lookup outcome. The key is compared using a constant-time comparison to avoid
 	// timing-based key enumeration. Accepts a Caddy global placeholder (e.g. "{env.DEBUG_KEY}").
 	DebugHeaders string `json:"debug_headers,omitempty"`
+	// 32-byte AES-256 key used to decrypt encrypted TXT record values.
+	// When set, TXT records that do not begin with "http://" or "https://" are treated
+	// as base64-encoded ciphertext (RawURLEncoding) and decrypted before processing.
+	// Because base64 never contains a colon, the URL scheme prefix is a reliable natural
+	// discriminator between plaintext and ciphertext — no explicit prefix is required in
+	// the TXT record.
+	//
+	// The encryption format is AES-256-GCM:
+	//   [12B nonce][ciphertext || 16B GCM auth tag]
+	//
+	// The key may be specified as:
+	//   - A base64-encoded 32-byte value (recommended): openssl rand -base64 32
+	//   - A plain 32-character ASCII string (e.g. a memorable passphrase)
+	// Accepts a Caddy global placeholder (e.g. "{env.ENCRYPTION_KEY}").
+	EncryptionKey string `json:"encryption_key,omitempty"`
 
 	// response rendering
-	responseTpl *template.Template
-	logger      *zap.Logger
-	debugKey    []byte     // compiled from DebugHeaders at provision time; nil when disabled
-	metrics     *rdMetrics // nil when Metrics is false
+	responseTpl   *template.Template
+	logger        *zap.Logger
+	debugKey      []byte     // compiled from DebugHeaders at provision time; nil when disabled
+	metrics       *rdMetrics // nil when Metrics is false
+	encryptionKey []byte     // 32-byte AES-256 key; nil when EncryptionKey is not configured
 
 	// redirect
 	statusCode          int               // explicit numeric code; only used when !statusCodeAuto && !statusCodeHTML
@@ -492,8 +508,26 @@ func autoStatusCode(permanent bool, method string) int {
 //     values. Only an explicit allowlist of request-derived placeholders is accepted;
 //     all others are replaced with an empty string to prevent accidental data leakage.
 //
+// When an encryption key is configured, records that do not start with "http://" or
+// "https://" are decrypted before placeholder expansion. Base64 never contains a colon,
+// so the URL scheme prefix is a reliable natural discriminator.
+//
 // Returns an empty target string if the TXT record does not contain a valid redirect.
 func (rd *RedirDns) parseTxtRecord(reqHost string, record string, r *http.Request) (string, int) {
+	// decrypt the record if an encryption key is configured and the value does not look
+	// like a plaintext URL. Base64 (any variant) never contains a ':', so the http:// /
+	// https:// scheme prefix reliably identifies unencrypted records.
+	if rd.encryptionKey != nil && !strings.HasPrefix(record, "http://") && !strings.HasPrefix(record, "https://") {
+		decrypted, err := decryptTxtRecord(rd.encryptionKey, record)
+		if err != nil {
+			if c := rd.logger.Check(zapcore.DebugLevel, "Rejected DNS TXT redirect candidate because decryption failed"); c != nil {
+				c.Write(zap.Error(err))
+			}
+			return "", rd.resolveStatusCode(r.Method)
+		}
+		record = decrypted
+	}
+
 	// first pass: rewrite shorthand tokens to full Caddy placeholder names
 	replaced := rd.replacer.Replace(record)
 
