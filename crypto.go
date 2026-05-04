@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	encKeySize    = 32 // AES-256 requires a 32-byte key
-	encNonceSize  = 12 // AES-GCM standard nonce length
-	encTagSize    = 16 // AES-GCM authentication tag length
+	encKeySize   = 32 // AES-256 requires a 32-byte key
+	encNonceSize = 12 // AES-GCM standard nonce length
+	encTagSize   = 16 // AES-GCM authentication tag length
 	// encMinBlobLen is the minimum decoded blob length: nonce + tag, with zero plaintext bytes.
 	encMinBlobLen = encNonceSize + encTagSize
 )

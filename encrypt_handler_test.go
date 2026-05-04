@@ -118,7 +118,9 @@ func TestEncryptHandler_EachCallProducesDifferentCiphertext(t *testing.T) {
 	w1 := serveEncrypt(t, h, http.MethodPost, body)
 	w2 := serveEncrypt(t, h, http.MethodPost, body)
 
-	var r1, r2 struct{ Ciphertext string `json:"ciphertext"` }
+	var r1, r2 struct {
+		Ciphertext string `json:"ciphertext"`
+	}
 	json.Unmarshal(w1.Body.Bytes(), &r1)
 	json.Unmarshal(w2.Body.Bytes(), &r2)
 
